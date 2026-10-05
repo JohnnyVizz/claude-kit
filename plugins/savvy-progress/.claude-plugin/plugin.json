@@ -18,6 +18,26 @@
         "en",
         "ru"
       ]
+    },
+    "animation": {
+      "type": "string",
+      "title": "Terminal animation",
+      "description": "on animates the crabs and the bar in the terminal; off draws them still",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "panel": {
+      "type": "string",
+      "title": "Agents panel",
+      "description": "manual opens the panel only on /agents-info; auto also opens it when a savvy-flow plan or worker starts",
+      "default": "manual",
+      "options": [
+        "manual",
+        "auto"
+      ]
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",

@@ -7,7 +7,7 @@ const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
 const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   isCompact: false,
-  isDoneCollapsed: false,
+  isDoneCollapsed: true,
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
@@ -620,6 +620,220 @@ const ctxBar = (pct: number, width: number): string => {
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
+// --- terminal animation: the same crabs as half-block cells in a Raster, two
+// pixels of the 30×28 grid per cell side, stepped by a frame clock and repainted
+// with `$.ui.blit`, so a frame costs no render pass.
+
+const GRID_W = 30
+const GRID_H = 28
+const CRAB_COLS = GRID_W / 2
+const CRAB_ROWS = GRID_H / 4
+// Eight frames a second: the CSS periods (.25s, .5s, 1s) are 2, 4 and 8 frames.
+const FRAME_MS = 125
+const TERM_DEFAULT = 0x01000000
+const NONE = -1
+// What a translucent pixel blends with over an empty cell: the terminal's own
+// background is not known, so a grey that reads on dark and light alike.
+const BACKDROP = 0x808080
+const BAND_BAR = 'savvy-bar'
+const BAND_CRAB = 'savvy-crab'
+const MINI_COLS = 4
+
+const rgbaOf = (c: string): [number, number, number, number] => {
+  if (c.startsWith('#')) {
+    const hex = c.length === 4 ? [...c.slice(1)].map(d => d + d).join('') : c.slice(1)
+    const n = parseInt(hex, 16)
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 1]
+  }
+  const p = (/\(([^)]+)\)/.exec(c)?.[1] ?? '').split(',').map(Number)
+  return [p[0] ?? 0, p[1] ?? 0, p[2] ?? 0, p[3] ?? 1]
+}
+
+const mix = (over: number, under: number, a: number): number => {
+  const ch = (shift: number) => Math.round(((over >> shift) & 255) * a + ((under >> shift) & 255) * (1 - a))
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
+// The CSS motion of CRAB_CSS in whole cells' worth of pixels (2 per step): where
+// a group stands on frame `f`, and whether a blinking one is out. Rotations
+// become a nudge, the nearest thing a 15×14 picture can show.
+const shiftOf = (costume: string, cls: string, f: number): [number, number, boolean] => {
+  const q = f % 4
+  const o = f % 8
+  if (costume === 'fable') {
+    const dy = o >= 2 && o < 6 ? -2 : 0
+    if (cls === 'ant') return [0, dy, o >= 4]
+    if (cls === 'star') return [0, dy, q < 2]
+    return [0, dy, false]
+  }
+  const isUp = costume === 'light' ? f % 2 === 1 : q >= 2
+  if (cls === 'la') return [0, isUp ? -2 : 0, false]
+  if (cls === 'lb') return [0, isUp ? 0 : -2, false]
+  const bob = q === 1 || q === 2 ? 2 : 0
+  if (cls === 'bd') return [0, bob, false]
+  if (costume === 'heavy' && cls === 'it') {
+    const d = [0, 2, 4, 2][o >> 1] ?? 0
+    return [-d, bob + d, false]
+  }
+  if (costume === 'heavy' && cls === 'gl') return [0, bob, o < 4]
+  if (costume === 'careful' && cls === 'it') return [0, bob + (q === 1 || q === 2 ? -2 : 0), false]
+  if (costume === 'medium' && cls === 'pan') return [0, bob + (o === 2 || o === 3 ? -2 : 0), false]
+  if (costume === 'medium' && cls === 'egg') return [0, bob + ([0, -2, -6, -4][o] ?? 0), false]
+  if (costume === 'light' && cls === 'flag') return [0, bob + (f % 2 ? 2 : 0), false]
+  if (costume === 'explore' && cls === 'it') return [q === 1 || q === 2 ? 2 : 0, bob, false]
+  return [0, bob, false]
+}
+
+type Stroke = { x: number; y: number; w: number; h: number; c: string; cls: string }
+
+// Painted in the SVG's order: body and costume, then the props, then the legs.
+const layerOf = (cls: string): number => (cls === 'bd' ? 0 : cls === 'la' || cls === 'lb' ? 2 : 1)
+
+const crabPixels = (costume: string, f: number, isWalking: boolean): Int32Array => {
+  const strokes: Stroke[] = []
+  const draw = COSTUMES[costume] ?? ((g: Fill) => crabBody(g))
+  draw((x, y, w, h, c, cls = 'bd') => strokes.push({ x, y, w, h, c, cls }), colorOf(costume))
+  const px = new Int32Array(GRID_W * GRID_H).fill(NONE)
+  for (const layer of [0, 1, 2]) {
+    for (const s of strokes) {
+      if (layerOf(s.cls) !== layer) continue
+      const [dx, dy, isOut] = isWalking ? shiftOf(costume, s.cls, f) : [0, 0, false]
+      if (isOut) continue
+      const [r, g, b, a] = rgbaOf(s.c)
+      const color = (r << 16) | (g << 8) | b
+      for (let y = s.y + dy; y < s.y + dy + s.h; y++) {
+        for (let x = s.x + dx; x < s.x + dx + s.w; x++) {
+          if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue
+          const under = px[y * GRID_W + x] ?? NONE
+          px[y * GRID_W + x] = a >= 1 ? color : mix(color, under === NONE ? BACKDROP : under, a)
+        }
+      }
+    }
+  }
+  return px
+}
+
+// One picture pixel of a 2×2 block of the grid: its most frequent color, or
+// nothing when at most one of the four is painted.
+const blockColor = (px: Int32Array, bx: number, by: number): number => {
+  const seen: number[] = []
+  for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
+    const c = px[(by * 2 + dy) * GRID_W + bx * 2 + dx] ?? NONE
+    if (c !== NONE) seen.push(c)
+  }
+  if (seen.length < 2) return NONE
+  let best = seen[0] ?? NONE
+  let bestN = 0
+  for (const c of seen) {
+    const n = seen.filter(v => v === c).length
+    if (n > bestN) {
+      best = c
+      bestN = n
+    }
+  }
+  return best
+}
+
+// Raster cells: `[codePoint, foreground, background]` u32 triplets, base64.
+const packCells = (words: number[]): string =>
+  (new Uint8Array(Uint32Array.from(words).buffer) as unknown as { toBase64: () => string }).toBase64()
+
+const crabCells = (costume: string, f: number, isWalking: boolean): string => {
+  const px = crabPixels(costume, f, isWalking)
+  const words: number[] = []
+  for (let row = 0; row < CRAB_ROWS; row++) {
+    for (let col = 0; col < CRAB_COLS; col++) {
+      const top = blockColor(px, col, row * 2)
+      const bottom = blockColor(px, col, row * 2 + 1)
+      if (top === NONE && bottom === NONE) words.push(0x20, TERM_DEFAULT, TERM_DEFAULT)
+      else if (top === NONE) words.push(0x2584, bottom, TERM_DEFAULT)
+      else words.push(0x2580, top, bottom === NONE ? TERM_DEFAULT : bottom)
+    }
+  }
+  return packCells(words)
+}
+
+const hexOf = (c: string): number => parseInt(c.slice(1), 16)
+
+// The band's bar: a light sweeps along the filled part while agents work.
+const barCells = (width: number, filled: number, f: number, color: string): string => {
+  const base = hexOf(color)
+  const head = filled > 0 ? f % (filled + 6) : -9
+  const words: number[] = []
+  for (let i = 0; i < width; i++) {
+    if (i >= filled) words.push(0x2591, base, TERM_DEFAULT)
+    else words.push(0x2588, mix(0xffffff, base, i === head ? 0.55 : i === head - 1 ? 0.25 : 0), TERM_DEFAULT)
+  }
+  return packCells(words)
+}
+
+// The band's crab, four cells: the claws go up and down twice a second.
+const miniCrabCells = (f: number): string => {
+  const isUp = f % 4 < 2
+  const clay = hexOf(CLAY)
+  return packCells([isUp ? 0x259a : 0x259e, clay, TERM_DEFAULT, 0x2588, clay, TERM_DEFAULT, 0x2588, clay, TERM_DEFAULT, isUp ? 0x259e : 0x259a, clay, TERM_DEFAULT])
+}
+
+type Sprite = { key: string; costume: string }
+type BandSite = { requestId: string; width: number; filled: number; color: string }
+
+// What the frame clock repaints: the Rasters the last terminal drawings mounted.
+let isAnimated = true
+let isAutoOpened = false
+let frame = 0
+let paneSprites: Sprite[] = []
+let bandSite: BandSite | null = null
+let ticker: { cancel: () => void } | null = null
+let isPainting = false
+let missed = 0
+
+// A refused blit means the site is gone (pane closed, band redrawn as text); a
+// few in a row, so that a drawing not yet mounted does not stop the clock.
+async function animate($: EngineInterface): Promise<void> {
+  if (isPainting) return
+  isPainting = true
+  try {
+    frame = (frame + 1) % 5040
+    let isMissed = false
+    for (const sp of paneSprites) {
+      const r = await $.ui.blit({ requestId: PANE, key: sp.key, cells: crabCells(sp.costume, frame, true) })
+      if (r.deny) isMissed = true
+    }
+    const b = bandSite
+    if (b) {
+      const r = await $.ui.blit({ requestId: b.requestId, key: BAND_BAR, cells: barCells(b.width, b.filled, frame, b.color) })
+      if (r.deny) isMissed = true
+      else await $.ui.blit({ requestId: b.requestId, key: BAND_CRAB, cells: miniCrabCells(frame) })
+    }
+    missed = isMissed ? missed + 1 : 0
+    if (missed >= 4) {
+      paneSprites = []
+      bandSite = null
+    }
+    if (paneSprites.length === 0 && bandSite === null) {
+      ticker?.cancel()
+      ticker = null
+      missed = 0
+    }
+  } catch {
+    // The surface is gone with its Rasters: nothing left to repaint.
+    paneSprites = []
+    bandSite = null
+    ticker?.cancel()
+    ticker = null
+    missed = 0
+  } finally {
+    isPainting = false
+  }
+}
+
+function startTicker($: EngineInterface): void {
+  if (ticker !== null || !isAnimated) return
+  ticker = $.clock.every(FRAME_MS, () => {
+    void animate($)
+  })
+}
+
 // Opens the agents pane, or closes it when it is up; true when it ends up open.
 async function togglePane($: EngineInterface): Promise<boolean> {
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
@@ -633,7 +847,9 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   return true
 }
 
+// Only where the `panel` option says `auto`; otherwise /agents-info alone opens it.
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
+  if (!isAutoOpened) return
   const p = await read($, panel)
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
@@ -644,6 +860,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
+    isAnimated = options.animation !== 'off'
+    isAutoOpened = options.panel === 'auto'
     await $.tool.register({
       name: 'progress',
       description:
@@ -703,6 +921,7 @@ export const register: Register = (on, options) => {
         if (!list.some(a => a.status === 'running')) return
         const at = await $.clock.now()
         await update($, now, () => at)
+        startTicker($)
       })()
     })
     return started
@@ -936,7 +1155,11 @@ export const register: Register = (on, options) => {
     // Terminal: the same content in text rows.
     const cols = Math.max(24, e.props.bodyColumns || 40)
     const barW = Math.max(6, Math.min(20, cols - 34))
-    const row = (a: AgentRun) => {
+    const crabBarW = Math.max(6, Math.min(20, cols - 34 - CRAB_COLS - 1))
+    // A running agent's crab stands left of its rows where the pane has the room.
+    const hasCrabs = e.surface === 'terminal' && 'Raster' in ui && cols >= CRAB_COLS + 30
+    const sprites: Sprite[] = []
+    const textRow = (a: AgentRun, barW: number) => {
       const tier = tierOf(a.type)
       const color = colorOf(tier)
       const ctx = ctxOf(a)
@@ -968,6 +1191,24 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    const row = (a: AgentRun) => textRow(a, barW)
+    const crabRow = (a: AgentRun) => {
+      if (!hasCrabs || !('Raster' in ui)) return row(a)
+      const { Raster } = ui
+      const sprite = { key: `crab-${a.id}`, costume: costumeOf(a.type) }
+      sprites.push(sprite)
+      return (
+        <Box key={a.id} flexDirection="row" gap={1}>
+          <Raster key={sprite.key} columns={CRAB_COLS} rows={CRAB_ROWS} cells={crabCells(sprite.costume, frame, isAnimated)} />
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent="center">
+            {textRow(a, crabBarW)}
+          </Box>
+        </Box>
+      )
+    }
+    const runningRows = p.isCompact ? [] : running.map(crabRow)
+    paneSprites = sprites
+    if (sprites.length > 0) startTicker($)
 
     return (
       <Box flexDirection="column">
@@ -997,7 +1238,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" marginTop={1}>
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
-            {running.map(row)}
+            {runningRows}
             {finished.length > 0 && toggleDone}
             {!p.isDoneCollapsed && finished.map(row)}
             {planned.length > 0 && <Text dimColor>{s.planned} · {planned.length}</Text>}
@@ -1024,7 +1265,10 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
-    if (f === null || e.props.hasSurvey) return next(e)
+    if (f === null || e.props.hasSurvey) {
+      bandSite = null
+      return next(e)
+    }
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
@@ -1045,7 +1289,7 @@ export const register: Register = (on, options) => {
       />
     )
 
-    if ('Svg' in ui) {
+    if (e.surface !== 'terminal' && 'Svg' in ui) {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
@@ -1061,7 +1305,31 @@ export const register: Register = (on, options) => {
 
     const cols = e.props.bodyColumns
     const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
-    const width = Math.max(6, Math.min(40, cols - titleW - 32))
+    const width = Math.max(6, Math.min(40, cols - titleW - 32 - MINI_COLS))
+    const color = f.isFinished ? DONE : ACCENT
+
+    // While agents work the bar and the crab are Rasters the frame clock repaints.
+    if (e.surface === 'terminal' && 'Raster' in ui && isAnimated && isWorking && e.requestId) {
+      const { Raster } = ui
+      const filled = Math.round(width * ratio(f))
+      bandSite = { requestId: e.requestId, width, filled, color }
+      startTicker($)
+      return (
+        <Box flexDirection="row" gap={2}>
+          <Box width={titleW} flexShrink={0}>
+            <Text color={color}>● </Text>
+            <Text wrap="truncate-end">{f.title}</Text>
+          </Box>
+          <Raster key={BAND_BAR} columns={width} rows={1} cells={barCells(width, filled, frame, color)} />
+          <Text bold>{label(f)}</Text>
+          <Text dimColor>{percent}</Text>
+          <Raster key={BAND_CRAB} columns={MINI_COLS} rows={1} cells={miniCrabCells(frame)} />
+          {crewButton}
+          {dismiss}
+        </Box>
+      )
+    }
+    bandSite = null
     return (
       <Box flexDirection="row" gap={2}>
         <Box width={titleW} flexShrink={0}>
