@@ -620,6 +620,20 @@ const ctxBar = (pct: number, width: number): string => {
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
+// The pixel crab in half blocks, 7 columns by 3 lines: the costume's hat in its
+// accent, then the clay body with two eyes, then legs that shuffle while it works.
+const TERM_HAT: Record<string, [string, string]> = {
+  fable: ['  ▄█▄  ', '#C9CCD2'],
+  heavy: ['▄█████▄', '#7A4A26'],
+  careful: [' ▄███▄ ', '#F5C542'],
+  medium: [' █████ ', '#F4F3EE'],
+  light: [' ▄███▄▀', TIER_COLOR.light ?? CLAY],
+  explore: ['██▄▄▄██', '#55514C'],
+}
+const TERM_BODY = '▄█▀█▀█▄'
+const TERM_LEGS = [' █▀█▀█ ', ' ▀█▀█▀ ']
+const TERM_CRAB_MIN_COLS = 40
+
 // Opens the agents pane, or closes it when it is up; true when it ends up open.
 async function togglePane($: EngineInterface): Promise<boolean> {
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
@@ -935,7 +949,20 @@ export const register: Register = (on, options) => {
 
     // Terminal: the same content in text rows.
     const cols = Math.max(24, e.props.bodyColumns || 40)
-    const barW = Math.max(6, Math.min(20, cols - 34))
+    const hasCrabs = cols >= TERM_CRAB_MIN_COLS
+    const barW = Math.max(6, Math.min(20, cols - 34 - (hasCrabs ? 8 : 0)))
+    const crabCol = (costume: string, isWalking: boolean, dim = false) => {
+      if (!hasCrabs) return null
+      const [hat, hatColor] = TERM_HAT[costume] ?? ['       ', CLAY]
+      const legs = TERM_LEGS[isWalking ? Math.floor(at / 1000) % 2 : 0]
+      return (
+        <Box flexDirection="column" marginRight={1}>
+          <Text color={hatColor} dimColor={dim}>{hat}</Text>
+          <Text color={CLAY} dimColor={dim}>{TERM_BODY}</Text>
+          <Text color={CLAY} dimColor={dim}>{legs}</Text>
+        </Box>
+      )
+    }
     const row = (a: AgentRun) => {
       const tier = tierOf(a.type)
       const color = colorOf(tier)
@@ -944,27 +971,30 @@ export const register: Register = (on, options) => {
       const model = a.effort ? `${modelName(a.model)} · ${a.effort}` : modelName(a.model)
       const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
       return (
-        <Box key={a.id} flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" gap={1}>
-            <Text color={color}>▣</Text>
-            <Text bold wrap="truncate-end">
-              {a.description || a.type}
+        <Box key={a.id} flexDirection="row" marginBottom={1}>
+          {crabCol(costumeOf(a.type), a.status === 'running')}
+          <Box flexDirection="column" flexGrow={1}>
+            <Box flexDirection="row" gap={1}>
+              <Text color={color}>▣</Text>
+              <Text bold wrap="truncate-end">
+                {a.description || a.type}
+              </Text>
+              <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
+            </Box>
+            <Text dimColor wrap="truncate-end">
+              {'  '}
+              {tier === 'other' ? a.type : tier} · {model}
+              {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
             </Text>
-            <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
+            <Text wrap="truncate-end">
+              {'  '}
+              {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
+              <Text dimColor>
+                {' '}
+                {steps}ctx {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              </Text>
+            </Text>
           </Box>
-          <Text dimColor wrap="truncate-end">
-            {'  '}
-            {tier === 'other' ? a.type : tier} · {model}
-            {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
-          </Text>
-          <Text wrap="truncate-end">
-            {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
-            <Text dimColor>
-              {' '}
-              {steps}ctx {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
-            </Text>
-          </Text>
         </Box>
       )
     }
@@ -1004,15 +1034,18 @@ export const register: Register = (on, options) => {
             {planned.map(pl => {
               const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
               return (
-                <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
-                  <Text dimColor wrap="truncate-end">
-                    <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
-                  </Text>
-                  <Text dimColor wrap="truncate-end">
-                    {'  '}
-                    {tier} · {TIER_MODEL[tier] ?? ''}
-                    {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
-                  </Text>
+                <Box key={`plan-${pl.n}`} flexDirection="row" marginBottom={1}>
+                  {crabCol(tier, false, true)}
+                  <Box flexDirection="column" flexGrow={1}>
+                    <Text dimColor wrap="truncate-end">
+                      <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
+                    </Text>
+                    <Text dimColor wrap="truncate-end">
+                      {'  '}
+                      {tier} · {TIER_MODEL[tier] ?? ''}
+                      {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
+                    </Text>
+                  </Box>
                 </Box>
               )
             })}
