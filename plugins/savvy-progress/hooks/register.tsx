@@ -1025,6 +1025,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
     if (f === null || e.props.hasSurvey) return next(e)
+    // Keep what the plugins beneath draw (next-steps, reflect, ...) under the bar.
+    const below = await next(e)
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
@@ -1051,10 +1053,13 @@ export const register: Register = (on, options) => {
       // and their gaps. No floor above the slot: a row wider than it would wrap.
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
-        <Box flexDirection="row" alignItems="center" gap={1}>
-          <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
-          {crewButton}
-          {dismiss}
+        <Box flexDirection="column">
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+            {crewButton}
+            {dismiss}
+          </Box>
+          {below}
         </Box>
       )
     }
@@ -1063,17 +1068,20 @@ export const register: Register = (on, options) => {
     const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
     const width = Math.max(6, Math.min(40, cols - titleW - 32))
     return (
-      <Box flexDirection="row" gap={2}>
-        <Box width={titleW} flexShrink={0}>
-          <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
-          <Text wrap="truncate-end">{f.title}</Text>
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={2}>
+          <Box width={titleW} flexShrink={0}>
+            <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
+            <Text wrap="truncate-end">{f.title}</Text>
+          </Box>
+          <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
+          <Text bold>{label(f)}</Text>
+          <Text dimColor>{percent}</Text>
+          <Text color={CLAY}>▣</Text>
+          {crewButton}
+          {dismiss}
         </Box>
-        <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
-        <Text bold>{label(f)}</Text>
-        <Text dimColor>{percent}</Text>
-        <Text color={CLAY}>▣</Text>
-        {crewButton}
-        {dismiss}
+        {below}
       </Box>
     )
   })
