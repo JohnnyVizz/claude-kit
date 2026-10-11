@@ -7,7 +7,7 @@ A Claude Code mod: a progress bar above the prompt and a live panel of subagents
 
 ## Delegate runs
 
-Runs dispatched through the `codex-delegate` and `claude-delegate` skills (`node …/relay.mjs`, from Bash or PowerShell) get a row too: ChatGPT's dot for Codex (a plain circle, dark on a light theme and light on a dark one), a cyan operator in a headset for the Claude CLI. The row shows the model and effort from the `--model` / `--effort` flags, or from the `--lane` looked up in the delegate-setup config (`.delegate/config.json` in the project, then `~/.config/delegate-skills/config.json`); with neither it reads `default`, the CLI's own choice. A delegate runs in another process, so its row has status and time, not tokens, context or cost. A background run finishes when its task notification arrives.
+Runs dispatched through the `codex-delegate` and `claude-delegate` skills (`node …/relay.mjs`, from Bash or PowerShell) get a row too: ChatGPT's dot for Codex (a circle with eyes, dark on a light theme and light on a dark one), a cyan operator in a headset for the Claude CLI. The row shows the model and effort from the `--model` / `--effort` flags, or from the `--lane` looked up in the delegate-setup config (`.delegate/config.json` in the project, then `~/.config/delegate-skills/config.json`); with neither it reads `default`, the CLI's own choice. A delegate runs in another process, so its row has status and time, not tokens, context or cost. A background run finishes when its task notification arrives.
 
 ## Tools it adds
 

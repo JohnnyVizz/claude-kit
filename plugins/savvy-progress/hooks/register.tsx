@@ -442,8 +442,8 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
-.c-codex rect{fill:#1f1f1f}
-@media (prefers-color-scheme: dark){.c-codex rect{fill:#ececec}}
+.c-codex rect{fill:#1f1f1f}.c-codex .eye rect{fill:#fff}
+@media (prefers-color-scheme: dark){.c-codex rect{fill:#ececec}.c-codex .eye rect{fill:#1f1f1f}}
 .c-codex.run .bd{transform-origin:50% 50%;animation:breathe 1s ease-in-out infinite}
 @keyframes breathe{50%{transform:scale(.82)}}
 .c-claude-cli.run .mic{animation:st .5s steps(1) infinite}
@@ -494,13 +494,14 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
   },
-  // Codex delegate: not a Claude, so no crab: ChatGPT's dot, one filled circle that breathes
+  // Codex delegate: not a Claude, so no crab: ChatGPT's dot with a pair of eyes, one filled circle that breathes
   // while it runs. CRAB_CSS paints it ink on a light theme and paper on a dark one.
   codex: f => {
     for (let y = -9; y < 9; y++) {
       const half = Math.round(Math.sqrt(81 - (y + 0.5) ** 2))
       f(15 - half, 14 + y, half * 2, 1, INK)
     }
+    f(11, 11, 2, 3, '#fff', 'eye'); f(17, 11, 2, 3, '#fff', 'eye')
   },
   // Claude CLI delegate: operator in a headset; the microphone bobs.
   'claude-cli': (f, t) => {
