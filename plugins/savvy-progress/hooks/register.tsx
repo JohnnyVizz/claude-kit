@@ -404,16 +404,16 @@ const stamp = (f: Fill, x: number, y: number, rows: string[], map: Record<string
   rows.forEach((row, dy) => [...row].forEach((ch, dx) => map[ch] && f(x + dx, y + dy, 1, 1, map[ch] ?? '', cls)))
 
 // `armCls` lets a raised claw travel with the prop it holds.
-const crabBody = (f: Fill, armFront = 0, armCls?: string): void => {
-  f(7, 10, 16, 12, CLAY)
-  f(3, 14, 4, 4, CLAY)
-  f(23, 14 + armFront, 4, 4, CLAY, armCls)
+const crabBody = (f: Fill, armFront = 0, armCls?: string, shell = CLAY): void => {
+  f(7, 10, 16, 12, shell)
+  f(3, 14, 4, 4, shell)
+  f(23, 14 + armFront, 4, 4, shell, armCls)
   f(9, 12, 2, 2, INK)
   f(19, 12, 2, 2, INK)
-  f(7, 22, 2, 4, CLAY, 'la')
-  f(17, 22, 2, 4, CLAY, 'la')
-  f(11, 22, 2, 4, CLAY, 'lb')
-  f(21, 22, 2, 4, CLAY, 'lb')
+  f(7, 22, 2, 4, shell, 'la')
+  f(17, 22, 2, 4, shell, 'la')
+  f(11, 22, 2, 4, shell, 'lb')
+  f(21, 22, 2, 4, shell, 'lb')
 }
 
 // Pure CSS, run by the compositor: no redraws. Periods divide one second, so the
@@ -491,9 +491,10 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
   },
-  // Codex delegate: a ChatGPT-green chat bubble overhead; its three typing dots blink in turn.
+  // Codex delegate: not a Claude, so the crab itself is ChatGPT green, under a chat bubble
+  // whose three typing dots blink in turn.
   codex: (f, t) => {
-    crabBody(f)
+    crabBody(f, 0, undefined, t)
     f(8, 0, 16, 6, t); f(7, 1, 1, 4, t); f(24, 1, 1, 4, t); f(10, 6, 3, 1, t); f(10, 7, 2, 1, t)
     f(11, 2, 2, 2, '#fff', 'd1'); f(15, 2, 2, 2, '#fff', 'd2'); f(19, 2, 2, 2, '#fff', 'd3')
   },
