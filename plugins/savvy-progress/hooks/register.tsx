@@ -280,7 +280,7 @@ const TIER_COLOR: Record<string, string> = {
   careful: '#BA7517',
   medium: '#378ADD',
   light: '#1D9E75',
-  codex: '#D4537E',
+  codex: '#19C37D',
   'claude-cli': '#2BB3C0',
   other: '#888780',
 }
@@ -442,7 +442,7 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
-.c-codex.run .eye{animation:blink .5s steps(1) infinite}
+.c-codex.run .d1{animation:blink 1s steps(1) infinite}.c-codex.run .d2{animation:blink 1s steps(1) infinite -.33s}.c-codex.run .d3{animation:blink 1s steps(1) infinite -.66s}
 .c-claude-cli.run .mic{animation:st .5s steps(1) infinite}
 @media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
 </style>`
@@ -491,12 +491,11 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
   },
-  // Codex delegate: robot in a steel helmet; the visor light and the antenna tip blink.
+  // Codex delegate: a ChatGPT-green chat bubble overhead; its three typing dots blink in turn.
   codex: (f, t) => {
     crabBody(f)
-    f(7, 3, 16, 7, '#B9BDC6'); f(6, 5, 1, 4, '#8E929A'); f(23, 5, 1, 4, '#8E929A')
-    f(9, 5, 12, 3, INK); f(11, 6, 3, 1, t, 'eye'); f(16, 6, 3, 1, t, 'eye')
-    f(14, 1, 2, 2, '#8E929A'); f(14, 0, 2, 1, t, 'eye')
+    f(8, 0, 16, 6, t); f(7, 1, 1, 4, t); f(24, 1, 1, 4, t); f(10, 6, 3, 1, t); f(10, 7, 2, 1, t)
+    f(11, 2, 2, 2, '#fff', 'd1'); f(15, 2, 2, 2, '#fff', 'd2'); f(19, 2, 2, 2, '#fff', 'd3')
   },
   // Claude CLI delegate: operator in a headset; the microphone bobs.
   'claude-cli': (f, t) => {

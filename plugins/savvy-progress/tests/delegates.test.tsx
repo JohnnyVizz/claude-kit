@@ -59,7 +59,7 @@ test('without a flag or a lane the model reads default; the desktop row wears th
   const text = await shown(ui)
   expect(text).toContain('default')
   expect(text).toContain('c-codex')
-  expect(text).toContain('#D4537E')
+  expect(text).toContain('#19C37D')
   await ui.unmount()
 })
 
