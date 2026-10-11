@@ -25,6 +25,8 @@ export type AgentRun = {
   description: string
   model: string
   effort?: string
+  /** Fleet lane a delegate run was dispatched through, when the launch named one. */
+  lane?: string
   status: AgentStatus
   startedAt: number
   endedAt?: number
