@@ -14,7 +14,14 @@
       "name": "savvy-progress",
       "source": "./plugins/savvy-progress",
       "description": "Mod: progress bar above the prompt and a live agents panel; made for savvy-flow, shows any subagents.",
-      "version": "1.2.0",
+      "version": "1.2.1",
+      "category": "mod"
+    },
+    {
+      "name": "session-band",
+      "source": "./plugins/session-band",
+      "description": "Mod: band above the prompt with turn, speed, cost, prompt cache countdown and context; notifies before the cache expires.",
+      "version": "0.2.0",
       "category": "mod"
     }
   ]

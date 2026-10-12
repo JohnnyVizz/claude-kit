@@ -4,3 +4,6 @@ node_modules/
 .claude/types/
 **/.claude-plugin/types/
 tsconfig.json
+
+# Built locally by plugins/session-band/notifier/build.sh
+plugins/session-band/notifier/*.app/

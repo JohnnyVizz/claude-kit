@@ -1,6 +1,6 @@
 {
   "name": "savvy-progress",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Progress bar above the prompt for /savvy-flow, plus an agents panel (/agents-info): running, finished and planned subagents with model, task progress, context, cost and time.",
   "author": {
     "name": "johnnyvizz",
@@ -11,12 +11,23 @@
     "language": {
       "type": "string",
       "title": "Panel language",
-      "description": "auto follows Claude Code's language setting, then the system locale",
+      "description": "auto follows Claude Code's language setting, then the system locale; en, ru or he (Hebrew, drawn right to left)",
       "default": "auto",
       "options": [
         "auto",
         "en",
-        "ru"
+        "ru",
+        "he"
+      ]
+    },
+    "autoOpen": {
+      "type": "string",
+      "title": "Open the agents panel",
+      "description": "savvy: when a savvy-flow worker starts or a plan is reported; any: also when any other subagent starts",
+      "default": "savvy",
+      "options": [
+        "savvy",
+        "any"
       ]
     }
   },

@@ -1,0 +1,13 @@
+{
+  "name": "session-band",
+  "version": "0.2.0",
+  "description": "Band above the prompt: turn number, output speed, turn and session cost, prompt cache countdown and context fill; notifies before the cache expires.",
+  "author": {
+    "name": "johnnyvizz",
+    "url": "https://github.com/johnnyvizz"
+  },
+  "types": "./types/index.d.ts",
+  "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/session-band",
+  "repository": "https://github.com/johnnyvizz/claude-kit",
+  "license": "MIT"
+}

@@ -18,7 +18,7 @@ Task from the user: $ARGUMENTS
 
 ## Progress bar
 
-If the tool `mcp__savvy-progress__progress` is available, keep it current; skip silently if it is not. Call it:
+If the tool `mcp__savvy-progress__progress` appears among your tools, including as a deferred tool, it is available: a deferred tool only needs loading first with ToolSearch (`select:mcp__savvy-progress__progress`). Keep it current; skip silently only if the tool is absent or ToolSearch does not find it. Call it:
 - after presenting the plan: `title` (a few words), `total` (number of worker tasks), `tasks` (`[{ title, tier, after }]` in plan order; `tier` without the `savvy-` prefix, `after` the numbers of the tasks it waits for), `phase: "delegate"` (or `"design"` while in section 2);
 - each time a task is accepted in review: `done` (accepted so far); switch `phase` to `"review"` while reviewing;
 - if re-planning changes the tasks: the new `tasks` and `total`;

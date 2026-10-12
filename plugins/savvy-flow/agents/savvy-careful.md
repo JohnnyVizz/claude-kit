@@ -1,6 +1,6 @@
 ---
 name: savvy-careful
-description: Savvy-flow careful worker (Opus, high effort). Well-understood but delicate work: multi-file refactors, bug fixes that must preserve invariants, logic with many edge cases, changes where thoroughness matters more than insight. Spawned only by the /savvy-flow orchestrator.
+description: "Savvy-flow careful worker (Opus, high effort). Well-understood but delicate work: multi-file refactors, bug fixes that must preserve invariants, logic with many edge cases, changes where thoroughness matters more than insight. Spawned only by the /savvy-flow orchestrator."
 model: opus
 effort: high
 ---
