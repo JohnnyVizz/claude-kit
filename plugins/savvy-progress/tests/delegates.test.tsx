@@ -1,20 +1,23 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-const RELAY = 'node "C:/Users/k/.claude/skills/codex-delegate/scripts/relay.mjs"'
+const RELAY = 'node ~/.claude/skills/codex-delegate/scripts/relay.mjs'
+// Files are keyed by the tail of their path: each OS makes a path absolute its own way.
+const GLOBAL_CONFIG = '/.config/delegate-skills/config.json'
 const CONFIG = JSON.stringify({ lanes: { tests: { implementer: 'codex', model: 'gpt-x', effort: 'medium' } } })
 
 type World = { tool?: (e: any) => unknown; files?: Record<string, string> }
 
 function world(on: any, w: World = {}) {
-  mock.env(on, { USERPROFILE: 'C:/Users/k' })
+  mock.env(on, { HOME: '/home/k' })
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   mock.store(on)
-  on('session.cwd', () => ({ value: 'C:/Users/k/proj' }))
+  on('session.cwd', () => ({ value: '/home/k/proj' }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('fs.read', (_$: any, e: any) => {
-    const text = w.files?.[String(e.path).replace(/\\/g, '/')]
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    return { value: text }
+    const path = String(e.path).replace(/\\/g, '/')
+    const hit = Object.entries(w.files ?? {}).find(([tail]) => path.endsWith(tail))
+    if (!hit) throw new Error(`ENOENT ${e.path}`)
+    return { value: hit[1] }
   })
   on('tool.call', (_$: any, e: any) => (w.tool?.(e) ?? { result: { stdout: 'relay: ok (exit 0)', stderr: '' } }) as any)
   on('prompt.submit', (_$: any, e: any) => ({ text: e.text }))
@@ -27,7 +30,7 @@ const pane = (surface: 'terminal' | 'desktop') =>
 const shown = async (ui: any): Promise<string> => JSON.stringify(await ui.drawn())
 
 test('a codex-delegate launch adds a row with the lane, and the lane config gives model and effort', { timeoutMs: 20_000 }, async ($, on) => {
-  const clock = world(on, { files: { 'C:/Users/k/.config/delegate-skills/config.json': CONFIG } })
+  const clock = world(on, { files: { [GLOBAL_CONFIG]: CONFIG } })
   await $.tool.call({ tool: 'Bash', command: `${RELAY} --brief brief.txt --lane tests`, description: 'Add the parser tests' } as any)
   await clock.settle()
   const ui = await $.ui.mount(pane('terminal'))
@@ -39,7 +42,7 @@ test('a codex-delegate launch adds a row with the lane, and the lane config give
 })
 
 test('flags win over the lane, and PowerShell launches of claude-delegate count too', { timeoutMs: 20_000 }, async ($, on) => {
-  const clock = world(on, { files: { 'C:/Users/k/.config/delegate-skills/config.json': CONFIG } })
+  const clock = world(on, { files: { [GLOBAL_CONFIG]: CONFIG } })
   await $.tool.call({ tool: 'PowerShell', command: 'node C:\\Users\\k\\.claude\\skills\\claude-delegate\\scripts\\relay.mjs --brief b.txt --lane tests --model opus --effort high', description: 'Refactor the loader' } as any)
   await clock.settle()
   const ui = await $.ui.mount(pane('terminal'))
