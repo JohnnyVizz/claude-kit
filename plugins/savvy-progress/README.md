@@ -5,6 +5,10 @@ A Claude Code mod: a progress bar above the prompt and a live panel of subagents
 - **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts.
 - **Agents panel** (`/agents-info` toggles it; `/agents-info open` opens it or brings it forward without toggling): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
 
+## Delegate runs
+
+Runs dispatched through the `codex-delegate` and `claude-delegate` skills (`node …/relay.mjs`, from Bash or PowerShell) get a row too: ChatGPT's dot for Codex (a circle with eyes, dark on a light theme and light on a dark one), a cyan operator in a headset for the Claude CLI. The row shows the model and effort from the `--model` / `--effort` flags, or from the `--lane` looked up in the delegate-setup config (`.delegate/config.json` in the project, then `~/.config/delegate-skills/config.json`); with neither it reads `default`, the CLI's own choice. A delegate runs in another process, so its row has status and time, not tokens, context or cost. A background run finishes when its task notification arrives.
+
 ## Tools it adds
 
 - `mcp__savvy-progress__progress`: the orchestrator reports the plan, phase and accepted tasks. Only the main session can: a call from a subagent is ignored, so a worker cannot rename, finish or reset the flow.

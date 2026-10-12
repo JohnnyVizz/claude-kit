@@ -361,6 +361,8 @@ const TIER_COLOR: Record<string, string> = {
   careful: '#BA7517',
   medium: '#378ADD',
   light: '#1D9E75',
+  codex: '#19C37D',
+  'claude-cli': '#2BB3C0',
   other: '#888780',
 }
 
@@ -439,7 +441,13 @@ const costOf = (model: string, u: Usage, isRequest: boolean): number => {
 const windowOf = (model: string): number => (/haiku-4|claude-3/i.test(model) ? 200_000 : 1_000_000)
 
 // `savvy-careful`, or `savvy-flow:savvy-careful` when the agents ship in a plugin.
+// A delegate run is another CLI, launched from the shell through a delegate skill's
+// relay: `delegate:codex` or `delegate:claude-cli`. No agent.spawn fires for it.
+const DELEGATE = 'delegate:'
+const isDelegate = (type: string): boolean => type.startsWith(DELEGATE)
+
 const tierOf = (type: string): string => {
+  if (isDelegate(type)) return type.slice(DELEGATE.length) in TIER_COLOR ? type.slice(DELEGATE.length) : 'other'
   const bare = type.replace(/^[^:]*:/, '')
   const t = bare.replace(/^savvy-/, '').toLowerCase()
   return Object.hasOwn(TIER_COLOR, t) && bare.startsWith('savvy-') ? t : 'other'
@@ -522,16 +530,16 @@ const stamp = (f: Fill, x: number, y: number, rows: string[], map: Record<string
   rows.forEach((row, dy) => [...row].forEach((ch, dx) => map[ch] && f(x + dx, y + dy, 1, 1, map[ch] ?? '', cls)))
 
 // `armCls` lets a raised claw travel with the prop it holds.
-const crabBody = (f: Fill, armFront = 0, armCls?: string): void => {
-  f(7, 10, 16, 12, CLAY)
-  f(3, 14, 4, 4, CLAY)
-  f(23, 14 + armFront, 4, 4, CLAY, armCls)
+const crabBody = (f: Fill, armFront = 0, armCls?: string, shell = CLAY): void => {
+  f(7, 10, 16, 12, shell)
+  f(3, 14, 4, 4, shell)
+  f(23, 14 + armFront, 4, 4, shell, armCls)
   f(9, 12, 2, 2, INK)
   f(19, 12, 2, 2, INK)
-  f(7, 22, 2, 4, CLAY, 'la')
-  f(17, 22, 2, 4, CLAY, 'la')
-  f(11, 22, 2, 4, CLAY, 'lb')
-  f(21, 22, 2, 4, CLAY, 'lb')
+  f(7, 22, 2, 4, shell, 'la')
+  f(17, 22, 2, 4, shell, 'la')
+  f(11, 22, 2, 4, shell, 'lb')
+  f(21, 22, 2, 4, shell, 'lb')
 }
 
 // Pure CSS, run by the compositor: no redraws. Periods divide one second, so the
@@ -560,6 +568,11 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
+.c-codex rect{fill:#1f1f1f}.c-codex .eye rect{fill:#fff}
+@media (prefers-color-scheme: dark){.c-codex rect{fill:#ececec}.c-codex .eye rect{fill:#1f1f1f}}
+.c-codex.run .bd{transform-origin:50% 50%;animation:breathe 1s ease-in-out infinite}
+@keyframes breathe{50%{transform:scale(.82)}}
+.c-claude-cli.run .mic{animation:st .5s steps(1) infinite}
 @media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
 </style>`
 
@@ -606,6 +619,22 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     stamp(f, 5, 3, ['.kk..............kk.', '.kkk....kkkk....kkk.', '..kkkkkkkwwkkkkkkk..', '..kkkkkkkkkkkkkkkk..', '.gggggggggggggggggg.'], { k: '#55514C', w: '#F8F6F1', g: '#F5C542' })
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
+  },
+  // Codex delegate: not a Claude, so no crab: ChatGPT's dot with a pair of eyes, one filled circle that breathes
+  // while it runs. CRAB_CSS paints it ink on a light theme and paper on a dark one.
+  codex: f => {
+    for (let y = -9; y < 9; y++) {
+      const half = Math.round(Math.sqrt(81 - (y + 0.5) ** 2))
+      f(15 - half, 14 + y, half * 2, 1, INK)
+    }
+    f(11, 11, 2, 3, '#fff', 'eye'); f(17, 11, 2, 3, '#fff', 'eye')
+  },
+  // Claude CLI delegate: operator in a headset; the microphone bobs.
+  'claude-cli': (f, t) => {
+    crabBody(f)
+    f(7, 8, 16, 1, '#3A3A3C'); f(6, 9, 1, 2, '#3A3A3C'); f(23, 9, 1, 2, '#3A3A3C')
+    f(5, 11, 2, 5, t); f(23, 11, 2, 3, t)
+    f(5, 16, 1, 2, '#3A3A3C', 'mic'); f(6, 18, 4, 1, '#3A3A3C', 'mic'); f(10, 17, 2, 2, t, 'mic')
   },
   other: f => crabBody(f),
 }
@@ -700,11 +729,15 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const ctx = ctxOf(a)
   const textW = W - 42 - 22
   const meta = [runModel(a)]
+  if (a.lane) meta.push(`lane ${a.lane}`)
   if (a.round > 1) meta.push(`${s.round} ${a.round}`)
   if (a.status === 'failed') meta.push(s.failed)
   const barW = textW
   const progress = progressOf(a)
-  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+  // A delegate runs in another process: the engine sees its time, not its tokens.
+  const stats = isDelegate(a.type)
+    ? fmtTime(elapsed(a, at))
+    : `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
   const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
@@ -790,7 +823,108 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   void $.ui.open({ id: PANE, title: tr().pane })
 }
 
+// --- delegate runs: codex-delegate and claude-delegate dispatch through `node …/relay.mjs`.
+
+const RELAY = /\b(codex|claude)-delegate[\\/]+scripts[\\/]+relay\.mjs/
+
+const flagOf = (command: string, name: string): string =>
+  new RegExp(`--${name}[=\\s]+(?:"([^"]*)"|'([^']*)'|(\\S+))`).exec(command)?.slice(1).find(Boolean) ?? ''
+
+// Background task id -> run id, until the task's completion notice arrives.
+const background = new Map<string, string>()
+
+// The lane's dials as delegate-setup wrote them: the project's config wins over the global one.
+async function laneOf($: EngineInterface, lane: string, cwd: string): Promise<{ model?: string; effort?: string }> {
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+  const base = (await $.env.get('XDG_CONFIG_HOME')) || `${home}/.config`
+  for (const path of [`${cwd}/.delegate/config.json`, `${base}/delegate-skills/config.json`]) {
+    try {
+      const found = (JSON.parse(String(await $.fs.read(path))) as { lanes?: Record<string, { model?: string; effort?: string }> }).lanes?.[lane]
+      if (found) return found
+    } catch {
+      continue
+    }
+  }
+  return {}
+}
+
+async function settle($: EngineInterface, id: string, ok: boolean): Promise<void> {
+  const at = await $.clock.now()
+  await update($, agents, list => list.map(a => (a.id === id ? { ...a, status: ok ? 'done' : 'failed', endedAt: at } : a)))
+  await update($, now, () => at)
+}
+
+async function settleBackground($: EngineInterface, text: string): Promise<void> {
+  if (background.size === 0 || !text.includes('<task-notification>')) return
+  for (const m of text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+    const taskId = /<task-id>([^<]*)<\/task-id>/.exec(m[1] ?? '')?.[1]?.trim() ?? ''
+    const id = background.get(taskId)
+    if (!id) continue
+    background.delete(taskId)
+    await settle($, id, /<status>\s*completed\s*<\/status>/.test(m[1] ?? ''))
+  }
+}
+
 export const register: Register = (on, options) => {
+  for (const tool of ['Bash', 'PowerShell'] as const)
+    on('tool.call', { tool }, async ($, e, next) => {
+      const command = String((e as { command?: unknown }).command ?? '')
+      const kind = RELAY.exec(command)?.[1]
+      if (!kind || /\s(-h|--help)(\s|$)/.test(command)) return next(e)
+
+      const lane = flagOf(command, 'lane')
+      const dial = lane ? await laneOf($, lane, (flagOf(command, 'cd') || (await $.session.cwd())).replace(/\\/g, '/')) : {}
+      const id = `delegate-${e.tool_use_id}`
+      const at = await $.clock.now()
+      const description = String((e as { description?: unknown }).description ?? '').trim()
+      await update($, agents, list => {
+        const run: AgentRun = {
+          id,
+          type: `${DELEGATE}${kind === 'codex' ? 'codex' : 'claude-cli'}`,
+          description,
+          // Without a flag or a lane the CLI picks its own default, which the launch does not show.
+          model: flagOf(command, 'model') || dial.model || 'default',
+          effort: flagOf(command, 'effort') || dial.effort || undefined,
+          lane: lane || undefined,
+          status: 'running',
+          startedAt: at,
+          contextTokens: 0,
+          contextMax: 0,
+          tokens: 0,
+          costUsd: 0,
+          steps: 0,
+          round: 1 + list.filter(a => description && norm(a.description) === norm(description)).length,
+        }
+        return [...list.filter(a => a.id !== id), run].slice(-200)
+      })
+      await update($, now, () => at)
+      await autoOpen($, 'delegates')
+
+      let result: Awaited<ReturnType<typeof next>>
+      try {
+        result = await next(e)
+      } catch (err) {
+        await settle($, id, false)
+        throw err
+      }
+      const out = (result.result ?? {}) as { stdout?: string; backgroundTaskId?: string }
+      if (result.deny !== undefined) await update($, agents, list => list.filter(a => a.id !== id))
+      else if (out.backgroundTaskId) background.set(out.backgroundTaskId, id)
+      else await settle($, id, !result.isError && !/relay: (failed|timeout|aborted)/.test(out.stdout ?? ''))
+      return result
+    })
+
+  // A background delegate ends with the engine's task notification, which arrives as a prompt or an attachment.
+  on('prompt.submit', async ($, e, next) => {
+    await settleBackground($, e.text)
+    return next(e)
+  })
+
+  on('prompt.attachment', async ($, e, next) => {
+    await settleBackground($, String(e.text ?? ''))
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
@@ -1135,6 +1269,7 @@ export const register: Register = (on, options) => {
           <Text dimColor wrap="truncate-end">
             {'  '}
             {tier === 'other' ? a.type : tierWord(tier)} · {model}
+            {a.lane ? ` · lane ${a.lane}` : ''}
             {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
           </Text>
           <Text wrap="truncate-end">
@@ -1142,7 +1277,8 @@ export const register: Register = (on, options) => {
             {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {isDelegate(a.type) ? '' : `${steps}${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)} ≈${fmtCost(a.costUsd)} `}
+              {fmtTime(elapsed(a, at))}
             </Text>
           </Text>
         </Box>
