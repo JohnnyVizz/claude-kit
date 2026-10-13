@@ -1,7 +1,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type {
+  AgentRun,
+  BackgroundStatus,
+  BackgroundTask,
+  Flow,
+  LimitWindow,
+  Panel,
+  Phase,
+  PlannedTask,
+  SessionFigures,
+  StepFile,
+  StepStatus,
+} from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,6 +23,9 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const usage = atom({ plugin: 'savvy-progress', key: 'usage' } as const, { rateLimits: [] } as SessionFigures)
+const bgCommands = atom({ plugin: 'savvy-progress', key: 'background' } as const, [] as BackgroundTask[])
+const snapshots = atom({ plugin: 'savvy-progress', key: 'snapshots' } as const, {} as Record<string, string | null>)
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -28,6 +43,7 @@ const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light'
 const MAX_TASKS = 200
 const MAX_AFTER = 20
 const MAX_TITLE = 120
+const MAX_SUMMARY = 300
 const ACCENT = '#8f8cf4'
 const DONE = '#5fbf8f'
 
@@ -37,8 +53,22 @@ type ProgressInput = {
   done?: number
   phase?: Phase
   finished?: boolean
-  tasks?: { title?: string; tier?: string; after?: number[] }[]
+  tasks?: { title?: string; tier?: string; after?: number[]; status?: string; summary?: string; avatar?: string }[]
 }
+
+const STEP_STATUSES: readonly StepStatus[] = ['pending', 'active', 'done']
+
+// The crab a solo step wears, named for what it looks like rather than the tier
+// that wears it on a subagent, so the model can pick one that suits the step.
+const AVATARS: Record<string, string> = {
+  detective: 'heavy',
+  engineer: 'careful',
+  chef: 'medium',
+  racer: 'light',
+  pirate: 'explore',
+  astronaut: 'fable',
+}
+const AVATAR_NAMES = Object.keys(AVATARS)
 
 // ---------------------------------------------------------------------------
 // Language: the `language` option, else Claude Code's `language` setting, else the
@@ -50,6 +80,8 @@ const STRINGS = {
   en: {
     pane: 'Agents',
     cost: 'Cost',
+    apiCost: 'API cost',
+    details: 'Details',
     tokens: 'Tokens',
     time: 'Time',
     collapse: 'Collapse',
@@ -74,13 +106,44 @@ const STRINGS = {
     tasks: 'Tasks',
     review: 'Review',
     busy: 'running',
+    steps: 'Steps',
+    stepActive: 'working on',
+    stepPending: 'pending',
+    stepDone: 'complete',
+    context: 'Context',
+    sessionLimit: 'Session limit',
+    weeklyLimit: 'Weekly limit',
+    resetsIn: 'resets in',
+    background: 'Background',
+    bgRunning: 'running',
+    bgCompleted: 'finished',
+    bgFailed: 'failed',
+    bgKilled: 'stopped',
+    silentFor: 'no output for',
+    waitingOutput: 'waiting for output…',
     ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+    ctxWord: 'context',
+    file: 'file',
+    files: 'files',
+    filesFew: 'files',
+    changed: 'changed',
+    finder: 'Finder',
+    diff: 'Diff',
+    hideDiff: 'Hide diff',
+    noChanges: 'No changes left in this file.',
+    tooBig: 'No diff for this file: too large, or diff could not run.',
+    fileRead: 'read',
+    fileNew: 'new',
+    edits: 'edits',
+    revealFailed: 'Could not show the file',
   },
   ru: {
     pane: 'Агенты',
     cost: 'Стоимость',
+    apiCost: 'Цена по API',
+    details: 'Подробнее',
     tokens: 'Токены',
     time: 'Время',
     collapse: 'Свернуть',
@@ -105,6 +168,35 @@ const STRINGS = {
     tasks: 'Задачи',
     review: 'Ревью',
     busy: 'в работе',
+    steps: 'Шаги',
+    stepActive: 'в работе',
+    stepPending: 'ожидает',
+    stepDone: 'готово',
+    context: 'Контекст',
+    sessionLimit: 'Лимит сессии',
+    weeklyLimit: 'Недельный лимит',
+    resetsIn: 'сброс через',
+    background: 'Фоновые задачи',
+    bgRunning: 'работает',
+    bgCompleted: 'завершена',
+    bgFailed: 'ошибка',
+    bgKilled: 'остановлена',
+    silentFor: 'нет вывода',
+    waitingOutput: 'ждём вывода…',
+    ctxWord: 'контекста',
+    file: 'файл',
+    files: 'файлов',
+    filesFew: 'файла',
+    changed: 'изменено',
+    finder: 'Finder',
+    diff: 'Дифф',
+    hideDiff: 'Скрыть дифф',
+    noChanges: 'В этом файле не осталось изменений.',
+    tooBig: 'Диффа нет: файл слишком большой или diff не запустился.',
+    fileRead: 'прочитан',
+    fileNew: 'новый',
+    edits: 'правок',
+    revealFailed: 'Не удалось показать файл',
     ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
@@ -139,12 +231,53 @@ const STRINGS = {
     ctx: 'הקשר',
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
+    apiCost: 'עלות API',
+    details: 'פרטים',
+    steps: 'שלבים',
+    stepActive: 'בעבודה',
+    stepPending: 'ממתין',
+    stepDone: 'הושלם',
+    context: 'הקשר',
+    sessionLimit: 'מגבלת סשן',
+    weeklyLimit: 'מגבלה שבועית',
+    resetsIn: 'מתאפס בעוד',
+    background: 'ברקע',
+    bgRunning: 'פועל',
+    bgCompleted: 'הסתיים',
+    bgFailed: 'נכשל',
+    bgKilled: 'נעצר',
+    silentFor: 'אין פלט כבר',
+    waitingOutput: 'ממתין לפלט…',
+    ctxWord: 'הקשר',
+    file: 'קובץ',
+    files: 'קבצים',
+    filesFew: 'קבצים',
+    changed: 'שונו',
+    finder: 'Finder',
+    diff: 'שינויים',
+    hideDiff: 'הסתרת שינויים',
+    noChanges: 'לא נשארו שינויים בקובץ הזה.',
+    tooBig: 'אין תצוגת שינויים לקובץ הזה: הוא גדול מדי, או ש-diff לא רץ.',
+    fileRead: 'נקרא',
+    fileNew: 'חדש',
+    edits: 'עריכות',
+    revealFailed: 'לא ניתן להציג את הקובץ',
   },
 } as const
 
 // Module scope is fine here: session.start sets it again on every (re)load.
 let lang: Lang = 'en'
-const tr = () => STRINGS[lang]
+// A language that lacks a label shows it in English, so one added before or
+// after a new label never draws `undefined`.
+const withEnglish = new Map<Lang, (typeof STRINGS)['en']>()
+const tr = (): (typeof STRINGS)['en'] => {
+  let s = withEnglish.get(lang)
+  if (!s) {
+    s = { ...STRINGS.en, ...STRINGS[lang] } as (typeof STRINGS)['en']
+    withEnglish.set(lang, s)
+  }
+  return s
+}
 
 // Hebrew draws every row mirrored: crab and title on the right, numbers on the left.
 const isRtl = () => lang === 'he'
@@ -177,6 +310,7 @@ const blank = (): Flow => ({
   phase: 'plan',
   isFinished: false,
   tasks: [],
+  startedAt: 0,
 })
 
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
@@ -196,14 +330,74 @@ const cleanTasks = (tasks: ProgressInput['tasks']): PlannedTask[] | undefined =>
       title: (t.title ?? '').trim(),
       tier: tierName(t.tier ?? ''),
       after: (t.after ?? []).filter(n => Number.isInteger(n) && n > 0).slice(0, MAX_AFTER),
+      ...(STEP_STATUSES.includes(t.status as StepStatus) ? { status: t.status as StepStatus } : {}),
+      ...(t.summary?.trim() ? { summary: clip(t.summary.trim(), MAX_SUMMARY) } : {}),
+      ...(AVATAR_NAMES.includes(t.avatar?.trim().toLowerCase() ?? '') ? { avatar: t.avatar?.trim().toLowerCase() } : {}),
     }))
 
-const merge = (prev: Flow | null, input: ProgressInput): Flow => {
+// Steps the orchestrator works through itself carry a status; worker tasks do not.
+const stepsOf = (f: Flow | null): (PlannedTask & { n: number })[] =>
+  (f?.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => t.status)
+
+const activeSteps = (f: Flow): number => f.tasks.filter(t => t.status === 'active').length
+
+// The bar's crab dresses as the step being worked on, or, once the flow is
+// done, as the step that finished it.
+const barCostume = (f: Flow): string => {
+  const step = f.isFinished ? f.tasks.filter(t => t.status).pop() : f.tasks.find(t => t.status === 'active')
+  return step ? avatarOf(step) : 'other'
+}
+
+// A flow that just finished gets a celebration; later redraws leave it still.
+const PARTY_MS = 10_000
+const barMood = (f: Flow, at: number): Mood | undefined =>
+  f.isFinished && f.endedAt !== undefined && at - f.endedAt < PARTY_MS ? 'party' : undefined
+
+// The session's running figures, read when a step starts and when it finishes.
+type Figures = { cost?: number; ctx?: number }
+
+const TIMING_KEYS = ['activeSince', 'endedAt', 'costFrom', 'costTo', 'ctxFrom', 'ctxTo'] as const
+const untimed = (t: PlannedTask): PlannedTask => {
+  const out = { ...t }
+  for (const k of TIMING_KEYS) delete out[k]
+  return out
+}
+
+// A step's clock and figures, carried from what the flow held before: set when
+// it becomes active, closed when it turns done, kept while it stays either.
+// The files a step touched ride along whatever the model resends.
+const settle = (t: PlannedTask, was: PlannedTask | undefined, at: number, fig: Figures): PlannedTask => {
+  const timed = settleTiming(t, was, at, fig)
+  return was?.files ? { ...timed, files: was.files } : timed
+}
+
+const settleTiming = (t: PlannedTask, was: PlannedTask | undefined, at: number, fig: Figures): PlannedTask => {
+  const bare = untimed(t)
+  if (t.status === 'active') {
+    if (was?.status === 'active') return { ...bare, activeSince: was.activeSince ?? at, costFrom: was.costFrom, ctxFrom: was.ctxFrom }
+    return { ...bare, activeSince: at, costFrom: fig.cost, ctxFrom: fig.ctx }
+  }
+  if (t.status === 'done' && was?.status === 'active') {
+    return { ...bare, activeSince: was.activeSince, endedAt: at, costFrom: was.costFrom, ctxFrom: was.ctxFrom, costTo: fig.cost, ctxTo: fig.ctx }
+  }
+  if (t.status === 'done' && was?.status === 'done') {
+    return { ...bare, ...Object.fromEntries(TIMING_KEYS.map(k => [k, was[k]]).filter(([, v]) => v !== undefined)) }
+  }
+  return bare
+}
+
+const merge = (prev: Flow | null, input: ProgressInput, at: number, fig: Figures = {}): Flow => {
   // A new title means a new flow: never carry counters over from an earlier one.
-  const base = isNewFlow(prev, input) || !prev ? blank() : { ...blank(), ...prev }
-  const tasks = cleanTasks(input.tasks) ?? base.tasks
+  const isNew = isNewFlow(prev, input) || !prev
+  const base = isNew ? { ...blank(), startedAt: at } : { ...blank(), ...prev }
+  const before = new Map(base.tasks.map(t => [norm(t.title), t]))
+  const incoming = cleanTasks(input.tasks) ?? base.tasks
+  // Closing the flow completes every step still open.
+  const closed = input.finished ? incoming.map(t => (t.status ? { ...t, status: 'done' as const } : t)) : incoming
+  const tasks = closed.map(t => settle(t, before.get(norm(t.title)), at, fig))
   const total = Math.min(MAX_TASKS, Math.max(0, Math.round(input.total ?? (input.tasks ? tasks.length : base.total))))
-  const done = Math.min(total || Infinity, Math.max(0, Math.round(input.done ?? base.done)))
+  const stepsDone = tasks.some(t => t.status) ? tasks.filter(t => t.status === 'done').length : undefined
+  const done = Math.min(total || Infinity, Math.max(0, Math.round(input.done ?? stepsDone ?? base.done)))
   const phase = input.phase && PHASES.includes(input.phase) ? input.phase : base.phase
   return {
     ...base,
@@ -213,6 +407,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
     phase: input.finished ? 'close' : phase,
     isFinished: input.finished === true,
     tasks,
+    endedAt: input.finished ? at : undefined,
   }
 }
 
@@ -271,7 +466,7 @@ const fitText = (s: string, size: number, maxW: number): string => {
   return out + '…'
 }
 
-const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
+const rowSvg = (f: Flow, W: number, isWorking: boolean, costume = 'other', mood?: Mood): string => {
   // The title takes what it needs, up to 40% of the row; the bar takes the rest.
   const title = fitText(f.title, 13, Math.max(60, W * 0.4))
   const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
@@ -279,7 +474,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
   const color = f.isFinished ? DONE : ACCENT
   const y0 = (H - BAR_H) / 2
   const fillW = Math.round(BAR_W * ratio(f))
-  const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running)) / f.total) : 0
+  const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running + activeSteps(f))) / f.total) : 0
   const dots: string[] = []
   // Positions are worked out left to right; right to left mirrors each box
   // inside the bar (`bx`) and across the row (`rx`). Text is never mirrored.
@@ -343,7 +538,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle"${rtl ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
 <text class="m" ${percentAt} font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, rtl)}
+${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, costume, false, isWorking, 0.8, rtl, mood)}
 </svg>`
 }
 
@@ -474,7 +669,7 @@ type Planned = PlannedTask & { n: number }
 const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   if (!f || f.isFinished) return []
   const started = new Set(list.map(a => norm(a.description)))
-  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(norm(t.title)))
+  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !t.status && !started.has(norm(t.title)))
 }
 
 const totals = (list: AgentRun[], at: number) => {
@@ -492,6 +687,8 @@ const totals = (list: AgentRun[], at: number) => {
 const GRID_STEP = 16
 // A Text or Button row on the desktop is about 20px; the grid errs taller.
 const LINE_H = 24
+// A line of a Code diff on the desktop, with room to spare.
+const DIFF_LINE_H = 20
 // The engine refuses an Svg taller than 4096px, so a long grid is stacked from
 // tiles of at most this height; a multiple of GRID_STEP keeps the dots aligned.
 const GRID_TILE = 4096
@@ -560,7 +757,14 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
-@media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
+/* Knocked out: on its back, legs kicking a few times, stars circling overhead. */
+.ko .la{animation:st .25s steps(1) 8}.ko .lb{animation:st .25s steps(1) 8 -.125s}.ko g{transform-box:fill-box}
+.dz0,.dz1,.dz2{animation:blink 1.2s steps(1) infinite}.dz1{animation-delay:-.4s}.dz2{animation-delay:-.8s}
+/* Celebrating: three hops, confetti that rises and fades once. */
+.party{animation:hop .4s ease-out 3}@keyframes hop{50%{transform:translateY(-3px)}}
+.cf{opacity:0;animation:cf 1.4s ease-out 2 both}.cf1{animation-delay:.15s}.cf2{animation-delay:.3s}.cf3{animation-delay:.45s}
+@keyframes cf{0%{opacity:0;transform:translateY(4px)}25%{opacity:1}100%{opacity:0;transform:translateY(-6px)}}
+@media (prefers-reduced-motion: reduce){.run,.run g,.ko g,.party,.dz0,.dz1,.dz2{animation:none!important}.cf{display:none}}
 </style>`
 
 const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
@@ -612,12 +816,46 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
 
 const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
 
+// A step without a chosen avatar gets one from its title, so it keeps the same
+// crab across updates and re-plans.
+const avatarOf = (p: Pick<PlannedTask, 'title' | 'avatar'>): string => {
+  if (p.avatar && AVATAR_NAMES.includes(p.avatar)) return AVATARS[p.avatar] ?? 'other'
+  let h = 0
+  for (const ch of norm(p.title)) h = (h * 31 + (ch.codePointAt(0) ?? 0)) >>> 0
+  return AVATARS[AVATAR_NAMES[h % AVATAR_NAMES.length] ?? ''] ?? 'other'
+}
+
 const CRAB_SCALE = 1.1
 
 // Body and props nest inside `bd` so a prop rides the bob and adds its own motion;
 // legs stay outside it and step on their own. `mirror` flips the crab inside its
 // own box (x .. x + CRAB_BOX * scale) so it faces left.
-const crab = (x: number, y: number, costume: string, dim = false, isWalking = false, scale = CRAB_SCALE, mirror = false): string => {
+// How a crab feels: `ko` lies on its back under circling stars (a failed run),
+// `party` hops in confetti (a finished flow).
+type Mood = 'ko' | 'party'
+
+const DIZZY = [4, 14, 24].map((x, i) => `<rect class="dz${i}" x="${x}" y="0" width="2" height="2" fill="#F5C542"/>`).join('')
+const CONFETTI = [
+  [1, 8, '#D85A30'],
+  [27, 6, '#378ADD'],
+  [5, 3, '#F5C542'],
+  [24, 2, '#1D9E75'],
+  [14, 1, '#7F77DD'],
+  [10, 5, '#D0453F'],
+]
+  .map(([x, y, c], i) => `<rect class="cf cf${i % 4}" x="${x}" y="${y}" width="2" height="2" fill="${c}"/>`)
+  .join('')
+
+const crab = (
+  x: number,
+  y: number,
+  costume: string,
+  dim = false,
+  isWalking = false,
+  scale = CRAB_SCALE,
+  mirror = false,
+  mood?: Mood,
+): string => {
   const groups = new Map<string, string[]>([['bd', []]])
   const f: Fill = (cx, cy, w, h, c, cls = 'bd') => {
     if (!groups.has(cls)) groups.set(cls, [])
@@ -629,7 +867,11 @@ const crab = (x: number, y: number, costume: string, dim = false, isWalking = fa
   const props = [...groups.keys()].filter(k => k !== 'bd' && k !== 'la' && k !== 'lb')
   const body = `<g class="bd">${(groups.get('bd') ?? []).join('')}${props.map(group).join('')}</g>`
   const place = mirror ? `translate(${x + CRAB_BOX * scale},${y}) scale(${-scale},${scale})` : `translate(${x},${y}) scale(${scale})`
-  return `<g transform="${place}" opacity="${dim ? 0.45 : 1}" shape-rendering="crispEdges"><g class="c-${costume}${isWalking ? ' run' : ''}">${body}${group('la')}${group('lb')}</g></g>`
+  const parts = `${body}${group('la')}${group('lb')}`
+  // On its back: flipped about the crab's middle, the stars drawn upright above.
+  const pose = mood === 'ko' ? `<g transform="translate(0,30) scale(1,-1)">${parts}</g>${DIZZY}` : parts
+  const cls = `c-${costume}${isWalking && !mood ? ' run' : ''}${mood ? ` ${mood}` : ''}`
+  return `<g transform="${place}" opacity="${dim ? 0.45 : 1}" shape-rendering="crispEdges"><g class="${cls}">${pose}</g>${mood === 'party' ? CONFETTI : ''}</g>`
 }
 
 const statusMark = (x: number, y: number, status: string, color: string): string => {
@@ -658,31 +900,296 @@ const endText = (W: number, x: number, y: number, words = false): string =>
 const crabWidth = (scale: number): number => Math.round(CRAB_BOX * scale * 100) / 100
 
 // A panel crab at x in a row of width W: on the mirrored side and facing left in Hebrew.
-const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, isWalking = false): string =>
-  crab(mx(W, x, crabWidth(CRAB_SCALE)), y, costume, dim, isWalking, CRAB_SCALE, isRtl())
+const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, isWalking = false, mood?: Mood): string =>
+  crab(mx(W, x, crabWidth(CRAB_SCALE)), y, costume, dim, isWalking, CRAB_SCALE, isRtl(), mood)
 
 const svg = (W: number, H: number, body: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${CRAB_CSS}${body}</svg>`
 
-// The pane's own title already says "Agents": the header names the flow, if any.
-const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>): string => {
+type Tile = { k: string; v: string }
+
+// Subagent totals while any ran; otherwise the session's own figures, which are
+// the engine's and exact.
+const tilesOf = (list: AgentRun[], f: Flow | null, u: SessionFigures, at: number): Tile[] => {
   const s = tr()
+  if (list.length) {
+    const t = totals(list, at)
+    return [
+      { k: s.cost, v: '≈' + fmtCost(t.cost) },
+      { k: s.tokens, v: fmtTokens(t.tokens) },
+      { k: s.time, v: fmtTime(t.time) },
+    ]
+  }
+  const since = f?.startedAt ? (f.endedAt ?? Math.max(at, f.startedAt)) - f.startedAt : 0
+  return [
+    { k: s.apiCost, v: u.costUsd === undefined ? '—' : fmtCost(u.costUsd) },
+    { k: s.context, v: u.contextPercent === undefined ? '—' : `${Math.round(u.contextPercent)}%` },
+    { k: s.time, v: fmtTime(since) },
+  ]
+}
+
+// The session window first, then the weekly all-models one, then anything else.
+const LIMIT_ORDER = ['five_hour', 'seven_day']
+const limitsOf = (u: SessionFigures): LimitWindow[] =>
+  [...u.rateLimits].sort((a, b) => {
+    const ia = LIMIT_ORDER.indexOf(a.kind)
+    const ib = LIMIT_ORDER.indexOf(b.kind)
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)
+  })
+
+const limitName = (kind: string): string =>
+  kind === 'five_hour' ? tr().sessionLimit : kind === 'seven_day' ? tr().weeklyLimit : kind.replace(/_/g, ' ')
+
+const limitColor = (pct: number): string => (pct >= 90 ? '#D0453F' : pct >= 75 ? '#BA7517' : ACCENT)
+
+const fmtResets = (resetsAt: string | undefined, at: number): string => {
+  const ms = resetsAt ? Date.parse(resetsAt) - at : NaN
+  if (!(ms > 0)) return ''
+  const m = Math.ceil(ms / 60000)
+  const d = Math.floor(m / 1440)
+  const h = Math.floor((m % 1440) / 60)
+  const mm = m % 60
+  return `${tr().resetsIn} ${d ? `${d}d ${h}h` : h ? `${h}h ${mm}m` : `${mm}m`}`
+}
+
+const LIMIT_ROW = 54
+const limitRows = (n: number): number => Math.ceil(n / 2)
+
+// The pane's own title already says "Agents": the header names the flow, if any.
+const headerSvg = (W: number, title: string, tiles: Tile[], limits: LimitWindow[], at: number): string => {
   const gap = 6
   const tw = (W - gap * 2) / 3
   const top = title ? 28 : 0
-  const tile = (i: number, k: string, v: string) =>
+  const tile = (i: number, { k, v }: Tile) =>
     `<rect class="tile" x="${mx(W, i * (tw + gap), tw)}" y="${top}" width="${tw}" height="40" rx="8"/>
-<text class="s" ${startText(W, i * (tw + gap) + 9, top + 16)} font-family="${FONT}" font-size="11">${k}</text>
-<text class="t" ${startText(W, i * (tw + gap) + 9, top + 33, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
+<text class="s" ${startText(W, i * (tw + gap) + 9, top + 16)} font-family="${FONT}" font-size="11">${xml(k)}</text>
+<text class="t" ${startText(W, i * (tw + gap) + 9, top + 33, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${xml(v)}</text>`
+  const lw = (W - gap) / 2
+  const limit = (i: number, l: LimitWindow) => {
+    const x = (i % 2) * (lw + gap)
+    const y = top + 46 + Math.floor(i / 2) * LIMIT_ROW
+    const pct = Math.max(0, Math.min(100, l.percentUsed))
+    const barX = x + 58
+    const barW = Math.max(20, lw - 67)
+    const fillW = Math.round((barW * pct) / 100)
+    const resets = fmtResets(l.resetsAt, at)
+    const name = fitText(limitName(l.kind), 11, resets ? lw * 0.5 : lw - 18)
+    // In Hebrew the tile mirrors: name and percent on the right, the reset time and the bar's start on the left.
+    const fillX = isRtl() ? mx(W, barX, barW) + barW - fillW : barX
+    return `<rect class="tile" x="${mx(W, x, lw)}" y="${y}" width="${lw}" height="48" rx="8"/>
+<text class="s" ${startText(W, x + 9, y + 16)} font-family="${FONT}" font-size="11">${xml(name)}</text>
+${resets ? `<text class="m" ${endText(W, x + lw - 9, y + 16, true)} font-family="${FONT}" font-size="10.5" font-variant-numeric="tabular-nums">${xml(fitText(resets, 10.5, lw * 0.45))}</text>` : ''}
+<text class="t" ${startText(W, x + 9, y + 37, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${Math.round(pct)}%</text>
+<rect class="k" x="${mx(W, barX, barW)}" y="${y + 29}" width="${barW}" height="5" rx="2.5"/><rect x="${fillX}" y="${y + 29}" width="${fillW}" height="5" rx="2.5" fill="${limitColor(pct)}"/>`
+  }
   return svg(
     W,
-    headerHeight(title),
+    headerHeight(title, limits.length),
     `${title ? `<text class="t" ${startText(W, 0, 15)} font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>` : ''}
-${tile(0, s.cost, '≈' + fmtCost(t.cost))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
+${tiles.map((t, i) => tile(i, t)).join('')}${limits.map((l, i) => limit(i, l)).join('')}`,
   )
 }
 
-const headerHeight = (title: string): number => (title ? 72 : 44)
+const headerHeight = (title: string, limits = 0): number =>
+  (title ? 72 : 44) + (limits ? limitRows(limits) * LIMIT_ROW - 2 : 0)
+
+const tilesAlt = (tiles: Tile[], limits: LimitWindow[]): string =>
+  [...tiles.map(t => `${t.k} ${t.v}`), ...limits.map(l => `${limitName(l.kind)} ${Math.round(l.percentUsed)}%`)].join(', ')
+
+// --- steps the orchestrator works through itself.
+
+// An active step shows how long it has been going, so a slow one never looks frozen.
+const stepLabel = (p: Pick<PlannedTask, 'status' | 'activeSince' | 'endedAt'>, at: number): string =>
+  p.status === 'done'
+    ? `${tr().stepDone}${p.activeSince !== undefined && p.endedAt !== undefined ? ` · ${fmtTime(p.endedAt - p.activeSince)}` : ''}`
+    : p.status === 'active'
+      ? `${tr().stepActive}${p.activeSince !== undefined ? ` · ${fmtTime(at - p.activeSince)}` : ''}`
+      : tr().stepPending
+
+const stepColor = (status: StepStatus | undefined): string =>
+  status === 'done' ? '#3B9C5F' : status === 'active' ? ACCENT : '#9a9a96'
+
+// Up to `max` lines of `s`, word-wrapped to `maxW`.
+const wrapLines = (s: string, size: number, maxW: number, max: number): string[] => {
+  const lines: string[] = []
+  for (const w of s.split(/\s+/).filter(Boolean)) {
+    const last = lines[lines.length - 1]
+    if (last !== undefined && textWidth(`${last} ${w}`, size) <= maxW) lines[lines.length - 1] = `${last} ${w}`
+    else lines.push(w)
+  }
+  // Whatever runs past the last line ends it with an ellipsis.
+  const kept = lines.slice(0, max - 1)
+  const rest = lines.slice(max - 1)
+  return [...kept, ...(rest.length ? [rest.join(' ')] : [])].map(l => fitText(l, size, maxW))
+}
+
+// Up to two lines of a step's summary.
+const wrap2 = (s: string, size: number, maxW: number): string[] => wrapLines(s, size, maxW, 2)
+
+// What a step spent of the session: money and context, so far while it runs,
+// in all once done. Empty for a step never seen active.
+const stepSpend = (p: PlannedTask, u: SessionFigures): string => {
+  const isLive = p.status === 'active'
+  const cost = isLive ? u.costUsd : p.costTo
+  const ctx = isLive ? u.contextPercent : p.ctxTo
+  const parts: string[] = []
+  if (cost !== undefined && p.costFrom !== undefined) parts.push(`+${fmtCost(Math.max(0, cost - p.costFrom))}`)
+  const ctxDelta = ctx !== undefined && p.ctxFrom !== undefined ? Math.round(ctx - p.ctxFrom) : 0
+  if (ctxDelta >= 1) parts.push(`+${ctxDelta}% ${tr().ctxWord}`)
+  return parts.join(' · ')
+}
+
+// Steps sit beside a crab, as agent rows do, and keep room for it without a summary.
+// The spend sits right of the summary, which wraps in what is left.
+const STEP_X = 42
+const spendWidth = (spend: string): number => (spend ? textWidth(spend, 11) + 12 : 0)
+const stepLines = (W: number, p: Planned, spend: string): string[] =>
+  wrap2(p.summary ?? '', 11.5, W - STEP_X - 4 - spendWidth(spend))
+
+const stepHeight = (W: number, p: Planned, u: SessionFigures): number =>
+  Math.max(46, 30 + stepLines(W, p, stepSpend(p, u)).length * 15)
+
+const stepSvg = (W: number, p: Planned, at: number, u: SessionFigures): string => {
+  const color = stepColor(p.status)
+  const tag = stepLabel(p, at)
+  const tagW = textWidth(tag, 11) + 4
+  const spend = stepSpend(p, u)
+  const H = stepHeight(W, p, u)
+  const lines = stepLines(W, p, spend)
+  const mark = statusMark(mx(W, W - 8), 14, p.status === 'active' ? 'running' : p.status === 'done' ? 'done' : 'planned', color)
+  // The active crab walks; a pending one waits, faded; a finished one stands still.
+  return svg(
+    W,
+    H,
+    `${rowCrab(W, 0, 6, avatarOf(p), p.status === 'pending', p.status === 'active')}${mark}
+<text class="${p.status === 'pending' ? 's' : 't'}" ${startText(W, STEP_X, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 13, W - STEP_X - tagW - 30))}</text>
+<text ${endText(W, W - 22, 18, true)} font-family="${FONT}" font-size="11" font-weight="500" fill="${color}">${xml(tag)}</text>
+${lines.map((l, i) => `<text class="s" ${startText(W, STEP_X, 35 + i * 15)} font-family="${FONT}" font-size="11.5">${xml(l)}</text>`).join('')}
+${spend ? `<text class="m" ${endText(W, W - 22, 35, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(spend)}</text>` : ''}
+<line class="ln" x1="0" y1="${H - 0.5}" x2="${W}" y2="${H - 0.5}"/>`,
+  )
+}
+
+// --- background shell commands, followed through their output files.
+
+const BG_SILENT_MS = 60_000
+// What a background task's ID looks like; anything else did not come from the engine.
+const BG_ID = /^[A-Za-z0-9_-]{1,64}$/
+const BG_READ_MAX = 4 * 1024 * 1024
+const BG_KEEP_DONE = 5
+
+// The last thing a command printed, with terminal colour codes and carriage
+// returns (progress bars redrawing one line) resolved to what a terminal shows.
+const outputLines = (text: string): string[] =>
+  text
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
+    .split('\n')
+    .map(l => l.split('\r').filter(Boolean).pop() ?? '')
+    .map(l => l.trim())
+    .filter(Boolean)
+
+// The line the engine appends when a background command ends.
+const endOf = (line: string): BackgroundStatus | undefined => {
+  const exit = /^\[exited with code (-?\d+)\]$/.exec(line)
+  if (exit) return exit[1] === '0' ? 'completed' : 'failed'
+  return /^\[(killed|stopped|terminated)\]$/i.test(line) ? 'killed' : undefined
+}
+
+// Progress the output reports itself: the latest `n/m`, `n of m` or `n%`.
+const progressIn = (text: string): number | undefined => {
+  const tail = text.slice(-4000)
+  let best: { at: number; value: number } | undefined
+  for (const m of tail.matchAll(/(\d[\d,]*)\s*(?:\/|of)\s*(\d[\d,]*)/g)) {
+    const n = Number((m[1] ?? '').replace(/,/g, ''))
+    const total = Number((m[2] ?? '').replace(/,/g, ''))
+    if (total > 1 && n <= total && (m.index ?? 0) >= (best?.at ?? -1)) best = { at: m.index ?? 0, value: n / total }
+  }
+  for (const m of tail.matchAll(/(\d{1,3}(?:\.\d+)?)\s?%/g)) {
+    const pct = Number(m[1])
+    if (pct <= 100 && (m.index ?? 0) >= (best?.at ?? -1)) best = { at: m.index ?? 0, value: pct / 100 }
+  }
+  return best?.value
+}
+
+const bgStatusLabel = (b: BackgroundTask): string => {
+  const s = tr()
+  return b.status === 'completed' ? s.bgCompleted : b.status === 'failed' ? s.bgFailed : b.status === 'killed' ? s.bgKilled : s.bgRunning
+}
+
+const bgMark = (b: BackgroundTask): string =>
+  b.status === 'running' ? 'running' : b.status === 'completed' ? 'done' : 'failed'
+
+const isSilent = (b: BackgroundTask, at: number): boolean =>
+  b.status === 'running' && at - (b.lastOutputAt ?? b.startedAt) > BG_SILENT_MS
+
+// What the row says under its title: the latest output, or how long it has been quiet.
+const bgDetail = (b: BackgroundTask, at: number): string => {
+  if (isSilent(b, at)) return `${tr().silentFor} ${fmtTime(at - (b.lastOutputAt ?? b.startedAt))}${b.lastLine ? ` · ${b.lastLine}` : ''}`
+  return b.lastLine || (b.status === 'running' ? tr().waitingOutput : '')
+}
+
+const bgElapsed = (b: BackgroundTask, at: number): number => (b.endedAt ?? Math.max(at, b.startedAt)) - b.startedAt
+
+// The description gets the row's full width and up to three lines, so a long one
+// (often where the progress hint lives) is read, not cut.
+const bgTitleLines = (W: number, b: BackgroundTask): string[] => wrapLines(b.label, 13, W - 24, 3)
+
+const bgHeight = (W: number, b: BackgroundTask): number => 56 + (bgTitleLines(W, b).length - 1) * 16
+
+const bgSvg = (W: number, b: BackgroundTask, at: number): string => {
+  const silent = isSilent(b, at)
+  const color = b.status === 'failed' || b.status === 'killed' ? '#D0453F' : b.status === 'completed' ? '#3B9C5F' : silent ? '#BA7517' : ACCENT
+  // A finished row says how it ended beside its time; a running one, its progress.
+  const right =
+    b.status === 'running'
+      ? `${b.progress !== undefined ? `${Math.round(b.progress * 100)}% · ` : ''}${fmtTime(bgElapsed(b, at))}`
+      : `${bgStatusLabel(b)} · ${fmtTime(bgElapsed(b, at))}`
+  const rightW = textWidth(right, 11) + 4
+  const barW = W - 24
+  const title = bgTitleLines(W, b)
+  const dy = (title.length - 1) * 16
+  const H = bgHeight(W, b)
+  const fill = b.status === 'completed' ? 1 : b.progress
+  // Without a reported figure a running command gets a sweeping bar: alive, amount
+  // unknown. It sweeps only while output keeps coming; a quiet one holds still.
+  // One second a sweep, as the once-a-second redraw restarts it.
+  const sweepW = Math.round(barW * 0.3)
+  const fillW = fill !== undefined ? Math.round(barW * fill) : 0
+  // The bar fills from its start: the left edge, or the right in Hebrew.
+  const bar =
+    fill !== undefined
+      ? `<rect x="${mx(W, 24, fillW)}" y="${44 + dy}" width="${fillW}" height="4" rx="2" fill="${color}"/>`
+      : b.status === 'running' && !silent
+        ? `<rect x="${mx(W, 24, sweepW)}" y="${44 + dy}" width="${sweepW}" height="4" rx="2" fill="${color}"><animate attributeName="x" values="${mx(W, 24, sweepW)};${mx(W, 24 + barW - sweepW, sweepW)};${mx(W, 24, sweepW)}" dur="1s" repeatCount="indefinite"/></rect>`
+        : ''
+  return svg(
+    W,
+    H,
+    `${statusMark(mx(W, 9), 14, bgMark(b), color)}
+${title.map((l, i) => `<text class="t" ${startText(W, 24, 18 + i * 16)} font-family="${FONT}" font-size="13" font-weight="600">${xml(l)}</text>`).join('')}
+<text ${startText(W, 24, 35 + dy)} font-family="${FONT}" font-size="11.5"${silent ? ` fill="${color}"` : ' class="s"'}>${xml(fitText(bgDetail(b, at), 11.5, W - 24 - rightW - 10))}</text>
+<text class="s" ${endText(W, W, 35 + dy)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(right)}</text>
+${b.status === 'running' || b.status === 'completed' ? `<rect class="k" x="${mx(W, 24, barW)}" y="${44 + dy}" width="${barW}" height="4" rx="2"/>` : ''}${bar}
+<line class="ln" x1="0" y1="${H - 0.5}" x2="${W}" y2="${H - 0.5}"/>`,
+  )
+}
+
+// Running commands first, then the most recent finished ones.
+const bgShown = (list: BackgroundTask[]): BackgroundTask[] => [
+  ...list.filter(b => b.status === 'running'),
+  ...list.filter(b => b.status !== 'running').slice(-BG_KEEP_DONE).reverse(),
+]
+
+// The status line names what runs in the background, so it shows without the panel.
+const bgStatusLine = (list: BackgroundTask[], at: number): string | undefined => {
+  const running = list.filter(b => b.status === 'running')
+  const b = running[0]
+  if (!b) return undefined
+  const more = running.length > 1 ? ` +${running.length - 1}` : ''
+  const pct = b.progress !== undefined ? ` · ${Math.round(b.progress * 100)}%` : ''
+  // The numbers first: a narrow status line cuts the name, not the time.
+  return `⏳ ${fmtTime(bgElapsed(b, at))}${pct}${more} · ${clip(b.label, 48)}`
+}
 
 // The task's own progress when the worker reports steps; a finished run is full.
 const progressOf = (a: AgentRun): number | null => {
@@ -712,7 +1219,7 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   return svg(
     W,
     66,
-    `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
+    `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running', a.status === 'failed' ? 'ko' : undefined)}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
@@ -750,7 +1257,7 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnTy
   const shown = icons.slice(0, fit)
   const more = icons.length - shown.length
   const body = shown
-    .map((ic, i) => rowCrab(W, i * 36, 0, ic.k, ic.dim, ic.s === 'running') + (ic.s === 'running' ? `<circle class="live" cx="${mx(W, i * 36 + 32)}" cy="4" r="3" fill="${ic.c}"/>` : ''))
+    .map((ic, i) => rowCrab(W, i * 36, 0, ic.k, ic.dim, ic.s === 'running', ic.s === 'failed' ? 'ko' : undefined) + (ic.s === 'running' ? `<circle class="live" cx="${mx(W, i * 36 + 32)}" cy="4" r="3" fill="${ic.c}"/>` : ''))
     .join('')
   const x = shown.length * 36 + (more ? 4 : 0)
   return svg(
@@ -783,6 +1290,261 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   return true
 }
 
+async function storeUsage(
+  $: EngineInterface,
+  u: { rateLimits: LimitWindow[]; cost?: { usd: number }; context: { percent?: number } },
+): Promise<void> {
+  await update($, usage, () => ({
+    rateLimits: u.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
+    costUsd: u.cost?.usd,
+    contextPercent: u.context.percent,
+  }))
+}
+
+// Reads what the running background commands printed since the last look: the
+// last line and any progress figure. `only` limits it to one command.
+async function followOutput($: EngineInterface, at: number, only?: string): Promise<void> {
+  const list = await read($, bgCommands)
+  for (const b of list) {
+    if (b.status !== 'running' || !b.outputFile || (only && b.id !== only)) continue
+    // A row that already read its end line (before this check existed) ends now.
+    const seenEnd = endOf(b.lastLine ?? '')
+    if (seenEnd) {
+      await update($, bgCommands, all =>
+        all.map(x => (x.id === b.id ? { ...x, status: seenEnd, endedAt: x.lastOutputAt ?? at } : x)),
+      )
+      continue
+    }
+    try {
+      const { size, mtimeMs } = await $.fs.stat(b.outputFile)
+      if (size === b.outputBytes) continue
+      // Past the read limit the size still proves it is alive; the text stays as it was.
+      const text = size <= BG_READ_MAX ? await $.fs.read(b.outputFile) : undefined
+      const lines = text === undefined ? [] : outputLines(text)
+      // The engine closes the file with `[exited with code N]` or `[killed]`: the
+      // command is over whether or not its notification ever reaches a hook.
+      const ended = endOf(lines[lines.length - 1] ?? '')
+      const shown = ended ? lines.slice(0, -1) : lines
+      const line = shown[shown.length - 1] || b.lastLine
+      const progress = text === undefined ? b.progress : (progressIn(shown.join('\n')) ?? b.progress)
+      const endedAt = mtimeMs > b.startedAt ? Math.min(at, mtimeMs) : at
+      await update($, bgCommands, all =>
+        all.map(x =>
+          x.id === b.id
+            ? { ...x, outputBytes: size, lastOutputAt: at, lastLine: line, progress, isSilenceAnnounced: false, ...(ended ? { status: ended, endedAt } : {}) }
+            : x,
+        ),
+      )
+    } catch {
+      // Not written yet: try again next tick. Gone a minute in (cleaned up, or its
+      // session ended): the command is not running any more.
+      if (at - b.startedAt > 60_000 && !(await $.fs.exists(b.outputFile).catch(() => false))) {
+        await update($, bgCommands, all => all.map(x => (x.id === b.id ? { ...x, status: 'killed' as const, endedAt: at } : x)))
+      }
+    }
+  }
+}
+
+// What a toast says about a command: how it ended, or that it went quiet.
+const bgToast = (b: BackgroundTask, at: number): string => {
+  const label = clip(b.label, 60)
+  const time = fmtTime(bgElapsed(b, at))
+  if (b.status === 'completed') return `✓ ${label}: ${tr().bgCompleted} · ${time}`
+  if (b.status === 'running') return `⏳ ${label}: ${tr().silentFor} ${fmtTime(at - (b.lastOutputAt ?? b.startedAt))}`
+  const why = b.lastLine ? ` · ${clip(b.lastLine, 80)}` : ''
+  return `${b.status === 'failed' ? '✗' : '■'} ${label}: ${bgStatusLabel(b)} · ${time}${why}`
+}
+
+// Tells the person once when a background command ends, and once each time it
+// goes quiet, so it is seen without the panel open.
+async function announceBackground($: EngineInterface, at: number): Promise<void> {
+  const list = await read($, bgCommands)
+  const ended = list.filter(b => b.status !== 'running' && !b.isAnnounced)
+  const quiet = list.filter(b => isSilent(b, at) && !b.isSilenceAnnounced)
+  if (!ended.length && !quiet.length) return
+  const endedIds = new Set(ended.map(b => b.id))
+  const quietIds = new Set(quiet.map(b => b.id))
+  await update($, bgCommands, all =>
+    all.map(b =>
+      endedIds.has(b.id) ? { ...b, isAnnounced: true } : quietIds.has(b.id) ? { ...b, isSilenceAnnounced: true } : b,
+    ),
+  )
+  for (const b of [...ended, ...quiet]) $.ui.toast(bgToast(b, at), { timeoutMs: b.status === 'completed' ? 6000 : 10000 })
+}
+
+// --- files each step read or changed, and what it changed in them.
+
+const FILE_TOOLS = { Read: 'read', Edit: 'edit', Write: 'edit', NotebookEdit: 'edit' } as const
+type FileTool = keyof typeof FILE_TOOLS
+
+const SNAPSHOT_MAX = 512 * 1024
+const DIFF_MAX = 40_000
+// A snapshot too large to keep: the step lists the file, without a diff.
+const TOO_BIG = '\u0000too-big'
+
+const stepKey = (t: Pick<PlannedTask, 'title'>): string => norm(t.title)
+const fileKey = (step: string, path: string): string => `${step}|${path}`
+
+// The session's folder and home, to show paths short; set on every (re)load.
+let cwd = ''
+let home = ''
+
+const shortPath = (path: string): string =>
+  cwd && path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path
+
+const pathOf = (e: unknown): string => {
+  const input = e as { file_path?: unknown; notebook_path?: unknown }
+  return String(input.file_path ?? input.notebook_path ?? '').trim()
+}
+
+// One more read or edit of `path` on each step in `keys`.
+const touch = (f: Flow, keys: Set<string>, path: string, kind: 'read' | 'edit', isNew: boolean): Flow => ({
+  ...f,
+  tasks: f.tasks.map(t => {
+    if (!keys.has(stepKey(t))) return t
+    const files = t.files ?? []
+    const was = files.find(x => x.path === path)
+    const base: StepFile = was ?? { path, reads: 0, edits: 0, ...(isNew && kind === 'edit' ? { isNew: true } : {}) }
+    // An edit makes any diff made so far stale.
+    const entry: StepFile =
+      kind === 'read' ? { ...base, reads: base.reads + 1 } : { ...base, edits: base.edits + 1, diff: undefined, added: undefined, removed: undefined }
+    return { ...t, files: was ? files.map(x => (x.path === path ? entry : x)) : [...files, entry].slice(-50) }
+  }),
+})
+
+// Cuts a long diff at a hunk boundary, so what is kept still parses.
+const cutDiff = (text: string): string => {
+  if (text.length <= DIFF_MAX) return text
+  const at = text.lastIndexOf('\n@@', DIFF_MAX)
+  return at > 0 ? text.slice(0, at + 1) : text.slice(0, text.lastIndexOf('\n', DIFF_MAX) + 1)
+}
+
+// What changed in `path` since `before`, by the system's diff: the text read
+// from stdin against the file as it is now (or /dev/null once it is gone).
+async function makeDiff($: EngineInterface, before: string | null | undefined, path: string): Promise<Partial<StepFile>> {
+  if (before === undefined || before === TOO_BIG) return {}
+  const exists = await $.fs.exists(path).catch(() => false)
+  const label = shortPath(path)
+  const r = await $.process.run(['diff', '-u', '--label', `a/${label}`, '--label', `b/${label}`, '-', exists ? path : '/dev/null'], {
+    stdin: before ?? '',
+  })
+  // 0: the same, 1: different, anything else: diff failed.
+  if (r.exitCode > 1) return {}
+  let added = 0
+  let removed = 0
+  for (const l of r.stdout.split('\n')) {
+    if (l.startsWith('+') && !l.startsWith('+++')) added++
+    else if (l.startsWith('-') && !l.startsWith('---')) removed++
+  }
+  return { diff: cutDiff(r.stdout), added, removed }
+}
+
+// Saves the diffs of the given step files into the flow; the snapshots they
+// came from go when `isFinal`.
+async function storeDiffs($: EngineInterface, made: Map<string, Partial<StepFile>>, isFinal: boolean): Promise<void> {
+  if (!made.size) return
+  await update($, flow, p =>
+    p
+      ? {
+          ...p,
+          tasks: p.tasks.map(t =>
+            t.files
+              ? { ...t, files: t.files.map(x => ({ ...x, ...(made.get(fileKey(stepKey(t), x.path)) ?? {}) })) }
+              : t,
+          ),
+        }
+      : p,
+  )
+  if (isFinal) await update($, snapshots, all => Object.fromEntries(Object.entries(all).filter(([k]) => !made.has(k))))
+}
+
+// Diffs every file a finished step changed, once, as the step closes.
+async function finalizeSteps($: EngineInterface): Promise<void> {
+  const f = await read($, flow)
+  if (!f) return
+  const snaps = await read($, snapshots)
+  const made = new Map<string, Partial<StepFile>>()
+  for (const t of f.tasks) {
+    if (t.status !== 'done') continue
+    for (const file of t.files ?? []) {
+      const k = fileKey(stepKey(t), file.path)
+      if (!file.edits || !(k in snaps)) continue
+      try {
+        made.set(k, snaps[k] === TOO_BIG ? { diff: undefined } : await makeDiff($, snaps[k], file.path))
+      } catch {
+        made.set(k, {})
+      }
+    }
+  }
+  await storeDiffs($, made, true)
+}
+
+// Shows the file in Finder; elsewhere, opens its folder.
+async function reveal($: EngineInterface, path: string): Promise<void> {
+  try {
+    const r = await $.process.run(['open', '-R', path])
+    if (r.exitCode === 0) return
+  } catch {
+    // Not macOS: try the desktop's opener on the folder.
+  }
+  try {
+    const r = await $.process.run(['xdg-open', path.replace(/\/[^/]*$/, '') || '/'])
+    if (r.exitCode === 0) return
+  } catch {
+    // Fall through to the toast.
+  }
+  $.ui.toast(`${tr().revealFailed}: ${shortPath(path)}`)
+}
+
+// Opens or closes one file's diff; a running step's diff is made fresh.
+async function toggleDiff($: EngineInterface, step: PlannedTask, file: StepFile): Promise<void> {
+  const k = fileKey(stepKey(step), file.path)
+  const p = await read($, panel)
+  if (p.diffOpen === k) {
+    await update($, panel, prev => ({ ...prev, diffOpen: '' }))
+    return
+  }
+  const snaps = await read($, snapshots)
+  if (k in snaps && (step.status === 'active' || file.diff === undefined)) {
+    try {
+      await storeDiffs($, new Map([[k, await makeDiff($, snaps[k], file.path)]]), false)
+    } catch {
+      // Shown without a diff.
+    }
+  }
+  await update($, panel, prev => ({ ...prev, diffOpen: k }))
+}
+
+const toggleStep = ($: EngineInterface, key: string) =>
+  update($, panel, prev => {
+    const open = new Set(prev.expandedSteps ?? [])
+    if (open.has(key)) open.delete(key)
+    else open.add(key)
+    return { ...prev, expandedSteps: [...open] }
+  })
+
+const fileStats = (file: StepFile): string => {
+  const s = tr()
+  if (!file.edits) return s.fileRead
+  const counts = file.added !== undefined ? `+${file.added} −${file.removed ?? 0}` : `${file.edits} ${s.edits}`
+  return file.isNew ? `${s.fileNew} · ${counts}` : counts
+}
+
+// "1 file", "3 files"; Russian has a third form for 2-4 (but not 12-14).
+const filesWord = (n: number): string => {
+  const s = tr()
+  const last = n % 10
+  const lastTwo = n % 100
+  if (last === 1 && lastTwo !== 11) return s.file
+  if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) return s.filesFew
+  return s.files
+}
+
+const filesHint = (files: StepFile[], isOpen: boolean): string =>
+  files.length
+    ? `${isOpen ? '▾' : '▸'} ${files.length} ${filesWord(files.length)}${files.some(f => f.edits) ? ` · ${files.filter(f => f.edits).length} ${tr().changed}` : ''}`
+    : ''
+
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
   const p = await read($, panel)
   if (p.autoOpenedFor === key) return
@@ -794,13 +1556,17 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
+    cwd = started.cwd.replace(/\/$/, '')
+    home = ((await $.env.get('HOME')) ?? '').replace(/\/$/, '')
     await $.tool.register({
       name: 'progress',
       description:
         'Report /savvy-flow progress to the progress bar above the prompt and the agents panel. ' +
         'Call it after presenting the plan (title, total, tasks, phase "delegate"), each time a task is accepted (done), ' +
         'when switching phase or re-planning (tasks), and once at the end with finished: true. Fields left out keep their previous value. ' +
-        'For the main session only: a call from a subagent is ignored (workers report with `step`).',
+        'For the main session only: a call from a subagent is ignored (workers report with `step`). ' +
+        'Working without subagents: give each task a `status` and a one-sentence `summary` and resend the full `tasks` list as steps start and finish; ' +
+        '`done` is then counted from the statuses.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -819,8 +1585,20 @@ export const register: Register = (on, options) => {
                 title: { type: 'string', description: 'A few words; reused verbatim as the Agent description.' },
                 tier: { type: 'string', enum: [...TIERS] },
                 after: { type: 'array', items: { type: 'integer' }, description: 'Numbers of the tasks this one waits for.' },
+                status: {
+                  type: 'string',
+                  enum: [...STEP_STATUSES],
+                  description: 'Only for steps you do yourself, without a subagent: pending, active (working on it) or done.',
+                },
+                summary: { type: 'string', description: 'One sentence: what the step does, or what it did once done.' },
+                avatar: {
+                  type: 'string',
+                  enum: AVATAR_NAMES,
+                  description:
+                    'Optional, for steps you do yourself: the crab that shows the step in the panel. detective to investigate, engineer to build or fix, chef to prepare or assemble, racer for quick checks and tests, pirate to explore, astronaut for research or design. Picked from the title when left out.',
+                },
               },
-              required: ['title', 'tier'],
+              required: ['title'],
             },
           },
         },
@@ -849,16 +1627,145 @@ export const register: Register = (on, options) => {
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
     })
 
-    // Ticks the running agents' clocks; quiet when nothing runs.
+    // Ticks the running agents', steps' and background commands' clocks, and
+    // follows the commands' output; quiet when nothing runs.
     $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        const f = await read($, flow)
+        const bg = await read($, bgCommands)
+        const isBgRunning = bg.some(b => b.status === 'running')
+        if (!list.some(a => a.status === 'running') && !(f && !f.isFinished && activeSteps(f)) && !isBgRunning) return
         const at = await $.clock.now()
+        if (isBgRunning) {
+          await followOutput($, at)
+          await announceBackground($, at)
+        }
+        // An active step's cost climbs as it goes: read the session's figures every few seconds.
+        if (f && !f.isFinished && activeSteps(f) && Math.floor(at / 1000) % 5 === 0) {
+          try {
+            await storeUsage($, await $.session.usage())
+          } catch {
+            // Keep the last figures.
+          }
+        }
         await update($, now, () => at)
+        $.ui.status(bgStatusLine(await read($, bgCommands), at))
       })()
     })
+
+    try {
+      await storeUsage($, await $.session.usage())
+    } catch {
+      // No figures yet: session.measure brings them after the first turn.
+    }
+    // Rows that ended before this load are old news: no toast for them. A running
+    // row with no ID or output file the engine would give was never a command (an
+    // earlier version read them out of any command's output text): it goes.
+    await update($, bgCommands, list =>
+      list
+        .filter(b => b.status !== 'running' || (BG_ID.test(b.id) && b.outputFile?.startsWith('/')))
+        .map(b => (b.status === 'running' ? b : { ...b, isAnnounced: true })),
+    )
     return started
+  })
+
+  // The session's limits, cost and context, pushed after each turn.
+  on('session.measure', async ($, e, next) => {
+    await storeUsage($, e)
+    return next(e)
+  })
+
+  // A shell command that went to the background, asked for or after its timeout:
+  // its result names the task and the file its output goes to.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const result = await next(e)
+    // Only the engine's own record says a command went to the background. The
+    // text is the command's output and may say anything, this hook's source included.
+    const record = (result.deny === undefined ? result.result : undefined) as { backgroundTaskId?: unknown } | undefined
+    const id = typeof record?.backgroundTaskId === 'string' && BG_ID.test(record.backgroundTaskId) ? record.backgroundTaskId : undefined
+    if (!id) return result
+    const text = 'text' in result && typeof result.text === 'string' ? result.text : ''
+    const input = e as unknown as { command?: string; description?: string }
+    const at = await $.clock.now()
+    const task: BackgroundTask = {
+      id,
+      label: input.description?.trim() || clip((input.command ?? '').trim(), 60) || id,
+      outputFile: /Output is being written to: (\/\S+?)\.?(?:\s|$)/.exec(text)?.[1],
+      status: 'running',
+      startedAt: at,
+      outputBytes: 0,
+    }
+    await update($, bgCommands, list => [...list.filter(b => b.id !== id), task].slice(-20))
+    await update($, now, () => at)
+    $.ui.status(bgStatusLine(await read($, bgCommands), at))
+    return result
+  })
+
+  // Reads and edits while a step is active belong to that step. Before a step
+  // first changes a file, the file's text is kept, so the step's diff is its own.
+  on('tool.call', { tool: /^(Read|Edit|Write|NotebookEdit)$/ }, async ($, e, next) => {
+    const kind = FILE_TOOLS[e.tool as FileTool]
+    const path = pathOf(e)
+    const f = await read($, flow)
+    const active = f && !f.isFinished ? f.tasks.filter(t => t.status === 'active') : []
+    if (!path || !active.length) return next(e)
+    let isNew = false
+    if (kind === 'edit') {
+      const snaps = await read($, snapshots)
+      const missing = active.filter(t => !(fileKey(stepKey(t), path) in snaps))
+      if (missing.length) {
+        let before: string | null
+        try {
+          const { size } = await $.fs.stat(path)
+          before = size <= SNAPSHOT_MAX ? await $.fs.read(path) : TOO_BIG
+        } catch {
+          before = null
+        }
+        isNew = before === null
+        await update($, snapshots, all => ({ ...all, ...Object.fromEntries(missing.map(t => [fileKey(stepKey(t), path), before])) }))
+      }
+    }
+    const result = await next(e)
+    if (result.deny !== undefined || result.isError) return result
+    const keys = new Set(active.map(stepKey))
+    await update($, flow, p => (p ? touch(p, keys, path, kind, isNew) : p))
+    return result
+  })
+
+  // Stopping a task by hand ends its row at once.
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    const result = await next(e)
+    const input = e as unknown as { task_id?: string; shell_id?: string }
+    const id = input.task_id ?? input.shell_id
+    if (id) {
+      const at = await $.clock.now()
+      await update($, bgCommands, list =>
+        list.map(b => (b.id === id && b.status === 'running' ? { ...b, status: 'killed' as const, endedAt: at, isAnnounced: true } : b)),
+      )
+      $.ui.status(bgStatusLine(await read($, bgCommands), at))
+    }
+    return result
+  })
+
+  // The engine announces a finished background task as a notification turn. The
+  // matcher says so up front, so the module's other prompt.submit hooks can sit beside it.
+  on('prompt.submit', { origin: { kind: 'task-notification' } }, async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') {
+      const id = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]?.trim()
+      const word = /<status>([^<]+)<\/status>/.exec(e.text)?.[1]?.trim().toLowerCase() ?? ''
+      const bg = id ? await read($, bgCommands) : []
+      if (id && bg.some(b => b.id === id && b.status === 'running')) {
+        const at = await $.clock.now()
+        await followOutput($, at, id)
+        const status: BackgroundStatus = word === 'completed' ? 'completed' : word === 'killed' ? 'killed' : 'failed'
+        await update($, bgCommands, list => list.map(b => (b.id === id ? { ...b, status, endedAt: at } : b)))
+        await announceBackground($, at)
+        await update($, now, () => at)
+        $.ui.status(bgStatusLine(await read($, bgCommands), at))
+      }
+    }
+    return next(e)
   })
 
   on('command.run', { command: 'agents-info' }, async ($, e) => {
@@ -880,10 +1787,26 @@ export const register: Register = (on, options) => {
     const input = e as unknown as ProgressInput
     const prev = await read($, flow)
     if (isNewFlow(prev, input) && input.title !== undefined) {
-      // A new flow starts with a clean list; agents still running stay.
+      // A new flow starts with a clean list: agents and background commands
+      // still running stay, what finished belongs to the work before.
       await update($, agents, list => list.filter(a => a.status === 'running'))
+      await update($, bgCommands, list => list.filter(b => b.status === 'running'))
+      await update($, snapshots, () => ({}))
     }
-    const next = await update($, flow, p => merge(p, input))
+    // A host with no clock (a test kit, say) still takes the report: step times then stand at the last tick.
+    const at = await $.clock.now().catch(() => read($, now))
+    await update($, now, () => at)
+    // The session's figures right now, so a step's cost starts and stops on this call.
+    let fig: Figures = {}
+    try {
+      const u = await $.session.usage()
+      await storeUsage($, u)
+      fig = { cost: u.cost?.usd, ctx: u.context.percent }
+    } catch {
+      // No figures: the step keeps its time, without a cost.
+    }
+    const next = await update($, flow, p => merge(p, input, at, fig))
+    await finalizeSteps($)
     if (next && input.tasks?.length) await autoOpen($, next.title)
     return { result: `ok: ${label(next ?? blank())}` }
   })
@@ -973,7 +1896,7 @@ export const register: Register = (on, options) => {
               ...a,
               model,
               effort: typeof e.effort === 'string' ? e.effort : a.effort,
-              status: 'running',
+              status: 'running' as const,
               endedAt: undefined,
               contextTokens:
                 (usage.input_tokens || 0) +
@@ -1006,7 +1929,7 @@ export const register: Register = (on, options) => {
           const fallback = a.steps === 0 && e.usage
           return {
             ...a,
-            status: e.reason === 'answer' ? 'done' : 'failed',
+            status: e.reason === 'answer' ? ('done' as const) : ('failed' as const),
             endedAt: at,
             ...(fallback && e.usage
               ? {
@@ -1034,12 +1957,22 @@ export const register: Register = (on, options) => {
     const list = await read($, agents)
     const f = await read($, flow)
     const p: Panel = await read($, panel)
+    const u = await read($, usage)
+    const clockAt = await $.clock.now().catch(() => read($, now))
     const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
     const planned = plannedOf(f, list)
+    const steps = stepsOf(f)
     const t = totals(list, at)
+    const tiles = tilesOf(list, f, u, Math.max(at, clockAt))
+    const limits = limitsOf(u)
+    const stepsHeader = `${s.steps} · ${steps.filter(p => p.status === 'done').length}/${steps.length}`
+    const liveAt = Math.max(at, clockAt)
+    const bg = bgShown(await read($, bgCommands))
+    const bgRunning = bg.filter(b => b.status === 'running').length
+    const bgHeader = `${s.background} · ${bgRunning ? `${bgRunning} ${s.bgRunning}` : bg.length}`
     // The pane's title says "Agents"; inside, only the flow's own name.
     const title = f && !f.isFinished ? f.title : ''
 
@@ -1059,8 +1992,44 @@ export const register: Register = (on, options) => {
         onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
       />
     )
-    const isEmpty = list.length === 0 && planned.length === 0
-    const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
+    const isEmpty = list.length === 0 && planned.length === 0 && steps.length === 0 && bg.length === 0
+    const summary = tilesAlt(tiles, limits)
+    const expanded = new Set(p.expandedSteps ?? [])
+    // Indent from where a line starts reading: the left, or the right in Hebrew.
+    const indent = (n: number) => (isRtl() ? { marginRight: n } : { marginLeft: n })
+    const { Code } = ui
+
+    // A step's files: each with what the step did to it, a button to show it in
+    // Finder and, for a changed file, one to open its diff underneath.
+    const fileList = (step: Planned) => (
+      <Box key={`files-${stepKey(step)}`} flexDirection="column" {...indent(e.surface === 'desktop' ? 5 : 2)} marginBottom={1}>
+        {(step.files ?? []).map(file => {
+          const k = fileKey(stepKey(step), file.path)
+          const isDiffOpen = p.diffOpen === k
+          return (
+            <Box key={`file-${k}`} flexDirection="column">
+              <Box flexDirection="row" gap={1}>
+                <Text wrap="truncate-start">{shortPath(file.path)}</Text>
+                <Text dimColor={!file.edits} color={file.edits ? (file.isNew ? 'green' : undefined) : undefined}>
+                  {fileStats(file)}
+                </Text>
+                <Button key={`finder-${k}`} label={s.finder} plain onPress={() => reveal($, file.path)} />
+                {file.edits ? (
+                  <Button key={`diff-${k}`} label={isDiffOpen ? s.hideDiff : s.diff} plain onPress={() => toggleDiff($, step, file)} />
+                ) : null}
+              </Box>
+              {isDiffOpen ? (
+                file.diff ? (
+                  <Code key={`code-${k}`} source={file.diff} format="diff" path={file.path} />
+                ) : (
+                  <Text dimColor>{file.diff === '' ? s.noChanges : s.tooBig}</Text>
+                )
+              ) : null}
+            </Box>
+          )
+        })}
+      </Box>
+    )
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
@@ -1083,7 +2052,22 @@ export const register: Register = (on, options) => {
       }
       const shownDone = p.isDoneCollapsed ? 0 : finished.length
       const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      const sections = (steps.length > 0 ? 1 : 0) + (bg.length > 0 ? 1 : 0)
+      // A step's files button, and when open a line per file and the open diff's lines.
+      const filesHeight = (st: Planned): number => {
+        if (!st.files?.length) return 0
+        if (!expanded.has(stepKey(st))) return LINE_H
+        const open = st.files.find(fl => p.diffOpen === fileKey(stepKey(st), fl.path))
+        const diffLines = open?.diff ? open.diff.split('\n').length : open ? 1 : 0
+        return LINE_H * (2 + st.files.length) + diffLines * DIFF_LINE_H
+      }
+      const gridH =
+        headerHeight(title, limits.length) +
+        (lines + sections) * LINE_H +
+        steps.reduce((h, st) => h + stepHeight(W, st, u) + filesHeight(st), 0) +
+        bg.reduce((h, b) => h + bgHeight(W, b), 0) +
+        (running.length + shownDone) * 66 +
+        planned.length * 46
       return (
         <Box flexDirection="column">
           {/* The grid sizes the pane; the content is placed over it, as an
@@ -1092,9 +2076,49 @@ export const register: Register = (on, options) => {
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
-            <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
+            <Svg
+              source={headerSvg(W, title, tiles, limits, clockAt)}
+              alt={title ? `${title}: ${summary}` : summary}
+              width={W}
+              height={headerHeight(title, limits.length)}
+            />
             {toggleCompact}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
+            {steps.length > 0 && section('h-steps', stepsHeader)}
+            {steps.map(p => {
+              const isOpen = expanded.has(stepKey(p))
+              const row = (
+                <Svg
+                  key={`step-${p.n}`}
+                  source={stepSvg(W, p, liveAt, u)}
+                  alt={`${p.n}. ${p.title}: ${stepLabel(p, liveAt)}${stepSpend(p, u) ? `, ${stepSpend(p, u)}` : ''}${p.summary ? `. ${p.summary}` : ''}`}
+                  width={W}
+                  height={stepHeight(W, p, u)}
+                />
+              )
+              // A step with files says how many under its row; a tap there opens them.
+              return p.files?.length ? (
+                <Box key={`step-${p.n}`} flexDirection="column" alignItems={align}>
+                  {row}
+                  <Box {...indent(5)}>
+                    <Button key={`open-${stepKey(p)}`} label={filesHint(p.files, isOpen)} plain onPress={() => toggleStep($, stepKey(p))} />
+                  </Box>
+                  {isOpen && fileList(p)}
+                </Box>
+              ) : (
+                row
+              )
+            })}
+            {bg.length > 0 && section('h-bg', bgHeader)}
+            {bg.map(b => (
+              <Svg
+                key={`bg-${b.id}`}
+                source={bgSvg(W, b, liveAt)}
+                alt={`${b.label}: ${bgStatusLabel(b)}, ${fmtTime(bgElapsed(b, liveAt))}. ${bgDetail(b, liveAt)}`}
+                width={W}
+                height={bgHeight(W, b)}
+              />
+            ))}
             {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
             {running.map(a => (
               <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
@@ -1157,9 +2181,15 @@ export const register: Register = (on, options) => {
           </Text>
           {toggleCompact}
         </Box>
-        <Text dimColor>
-          ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
-        </Text>
+        <Text dimColor wrap="truncate-end">{tiles.map(x => `${x.k} ${x.v}`).join(' · ')}</Text>
+        {limits.map(l => (
+          <Text key={`limit-${l.kind}`} wrap="truncate-end">
+            <Text dimColor>{limitName(l.kind)} </Text>
+            <Text color={limitColor(l.percentUsed)}>{ctxBar(Math.min(100, l.percentUsed), Math.max(6, Math.min(16, cols - 40)))}</Text>
+            <Text> {Math.round(l.percentUsed)}%</Text>
+            <Text dimColor> {fmtResets(l.resetsAt, clockAt)}</Text>
+          </Text>
+        ))}
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
@@ -1176,6 +2206,63 @@ export const register: Register = (on, options) => {
         ) : (
           <Box flexDirection="column" marginTop={1}>
             {isEmpty && <Text dimColor>{s.empty}</Text>}
+            {steps.length > 0 && <Text dimColor>{stepsHeader}</Text>}
+            {steps.map(pl => (
+              <Box key={`step-${pl.n}`} flexDirection="column" marginBottom={1}>
+                <Box flexDirection="row" gap={1}>
+                  <Text color={stepColor(pl.status)}>{STATUS_GLYPH[pl.status === 'active' ? 'running' : pl.status === 'done' ? 'done' : 'planned']}</Text>
+                  <Text bold={pl.status !== 'pending'} dimColor={pl.status === 'pending'} wrap="truncate-end">
+                    {pl.n}. {pl.title}
+                  </Text>
+                  <Text color={stepColor(pl.status)}>{stepLabel(pl, liveAt)}</Text>
+                  {stepSpend(pl, u) ? <Text dimColor>{stepSpend(pl, u)}</Text> : null}
+                </Box>
+                {pl.summary ? (
+                  <Text dimColor wrap="wrap">
+                    {'  '}
+                    {pl.summary}
+                  </Text>
+                ) : null}
+                {pl.files?.length ? (
+                  <Button
+                    key={`open-${stepKey(pl)}`}
+                    label={`  ${filesHint(pl.files, expanded.has(stepKey(pl)))}`}
+                    plain
+                    onPress={() => toggleStep($, stepKey(pl))}
+                  />
+                ) : null}
+                {expanded.has(stepKey(pl)) && fileList(pl)}
+              </Box>
+            ))}
+            {bg.length > 0 && <Text dimColor>{bgHeader}</Text>}
+            {bg.map(b => {
+              const color = b.status === 'completed' ? 'green' : b.status === 'running' ? (isSilent(b, liveAt) ? 'yellow' : ACCENT) : 'red'
+              const pct = b.progress !== undefined && b.status === 'running' ? `${Math.round(b.progress * 100)}% · ` : ''
+              return (
+                <Box key={`bg-${b.id}`} flexDirection="column" marginBottom={1}>
+                  <Box flexDirection="row" gap={1}>
+                    <Text color={color}>{STATUS_GLYPH[bgMark(b)]}</Text>
+                    <Text bold wrap="wrap">
+                      {b.label}
+                    </Text>
+                    <Text dimColor>
+                      {b.status === 'running' ? pct : `${bgStatusLabel(b)} · `}
+                      {fmtTime(bgElapsed(b, liveAt))}
+                    </Text>
+                  </Box>
+                  {b.progress !== undefined && b.status === 'running' ? (
+                    <Text color={color}>
+                      {'  '}
+                      {ctxBar(b.progress * 100, barW)}
+                    </Text>
+                  ) : null}
+                  <Text dimColor={!isSilent(b, liveAt)} color={isSilent(b, liveAt) ? 'yellow' : undefined} wrap="truncate-end">
+                    {'  '}
+                    {bgDetail(b, liveAt)}
+                  </Text>
+                </Box>
+              )
+            })}
             {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
             {running.map(row)}
             {finished.length > 0 && toggleDone}
@@ -1214,11 +2301,15 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = ui
     const list = await read($, agents)
     const crew = list.length + plannedOf(f, list).length
-    const isWorking = list.some(a => a.status === 'running')
+    const isWorking =
+      list.some(a => a.status === 'running') ||
+      (!f.isFinished && activeSteps(f) > 0) ||
+      (await read($, bgCommands)).some(b => b.status === 'running')
     const crewButton = (
-      <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
+      <Button key="savvy-agents" label={crew ? `×${crew}` : tr().details} plain onPress={() => void togglePane($)} />
     )
     const percent = `${Math.round(ratio(f) * 100)}%`
+    const mood = barMood(f, await $.clock.now().catch(() => read($, now)))
     const dismiss = (
       <Button
         key="savvy-dismiss"
@@ -1238,7 +2329,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+            <Svg source={rowSvg(f, width, isWorking, barCostume(f), mood)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
             {crewButton}
             {dismiss}
           </Box>

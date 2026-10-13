@@ -14,7 +14,7 @@
       "name": "savvy-progress",
       "source": "./plugins/savvy-progress",
       "description": "Mod: progress bar above the prompt and a live agents panel; made for savvy-flow, shows any subagents.",
-      "version": "1.2.1",
+      "version": "1.3.0",
       "category": "mod"
     },
     {
