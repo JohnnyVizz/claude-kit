@@ -1,7 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type {
+  AgentRun,
+  BackgroundStatus,
+  BackgroundTask,
+  Flow,
+  LimitWindow,
+  Panel,
+  Phase,
+  PlannedTask,
+  SessionFigures,
+  StepStatus,
+} from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,6 +22,8 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const usage = atom({ plugin: 'savvy-progress', key: 'usage' } as const, { rateLimits: [] } as SessionFigures)
+const bgCommands = atom({ plugin: 'savvy-progress', key: 'background' } as const, [] as BackgroundTask[])
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -28,6 +41,7 @@ const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light'
 const MAX_TASKS = 200
 const MAX_AFTER = 20
 const MAX_TITLE = 120
+const MAX_SUMMARY = 300
 const ACCENT = '#8f8cf4'
 const DONE = '#5fbf8f'
 
@@ -37,8 +51,22 @@ type ProgressInput = {
   done?: number
   phase?: Phase
   finished?: boolean
-  tasks?: { title?: string; tier?: string; after?: number[] }[]
+  tasks?: { title?: string; tier?: string; after?: number[]; status?: string; summary?: string; avatar?: string }[]
 }
+
+const STEP_STATUSES: readonly StepStatus[] = ['pending', 'active', 'done']
+
+// The crab a solo step wears, named for what it looks like rather than the tier
+// that wears it on a subagent, so the model can pick one that suits the step.
+const AVATARS: Record<string, string> = {
+  detective: 'heavy',
+  engineer: 'careful',
+  chef: 'medium',
+  racer: 'light',
+  pirate: 'explore',
+  astronaut: 'fable',
+}
+const AVATAR_NAMES = Object.keys(AVATARS)
 
 // ---------------------------------------------------------------------------
 // Language: the `language` option, else Claude Code's `language` setting, else the
@@ -50,6 +78,8 @@ const STRINGS = {
   en: {
     pane: 'Agents',
     cost: 'Cost',
+    apiCost: 'API cost',
+    details: 'Details',
     tokens: 'Tokens',
     time: 'Time',
     collapse: 'Collapse',
@@ -74,6 +104,21 @@ const STRINGS = {
     tasks: 'Tasks',
     review: 'Review',
     busy: 'running',
+    steps: 'Steps',
+    stepActive: 'working on',
+    stepPending: 'pending',
+    stepDone: 'complete',
+    context: 'Context',
+    sessionLimit: 'Session limit',
+    weeklyLimit: 'Weekly limit',
+    resetsIn: 'resets in',
+    background: 'Background',
+    bgRunning: 'running',
+    bgCompleted: 'finished',
+    bgFailed: 'failed',
+    bgKilled: 'stopped',
+    silentFor: 'no output for',
+    waitingOutput: 'waiting for output…',
     ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
@@ -81,6 +126,8 @@ const STRINGS = {
   ru: {
     pane: 'Агенты',
     cost: 'Стоимость',
+    apiCost: 'Цена по API',
+    details: 'Подробнее',
     tokens: 'Токены',
     time: 'Время',
     collapse: 'Свернуть',
@@ -105,6 +152,21 @@ const STRINGS = {
     tasks: 'Задачи',
     review: 'Ревью',
     busy: 'в работе',
+    steps: 'Шаги',
+    stepActive: 'в работе',
+    stepPending: 'ожидает',
+    stepDone: 'готово',
+    context: 'Контекст',
+    sessionLimit: 'Лимит сессии',
+    weeklyLimit: 'Недельный лимит',
+    resetsIn: 'сброс через',
+    background: 'Фоновые задачи',
+    bgRunning: 'работает',
+    bgCompleted: 'завершена',
+    bgFailed: 'ошибка',
+    bgKilled: 'остановлена',
+    silentFor: 'нет вывода',
+    waitingOutput: 'ждём вывода…',
     ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
@@ -139,12 +201,39 @@ const STRINGS = {
     ctx: 'הקשר',
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
+    apiCost: 'עלות API',
+    details: 'פרטים',
+    steps: 'שלבים',
+    stepActive: 'בעבודה',
+    stepPending: 'ממתין',
+    stepDone: 'הושלם',
+    context: 'הקשר',
+    sessionLimit: 'מגבלת סשן',
+    weeklyLimit: 'מגבלה שבועית',
+    resetsIn: 'מתאפס בעוד',
+    background: 'ברקע',
+    bgRunning: 'פועל',
+    bgCompleted: 'הסתיים',
+    bgFailed: 'נכשל',
+    bgKilled: 'נעצר',
+    silentFor: 'אין פלט כבר',
+    waitingOutput: 'ממתין לפלט…',
   },
 } as const
 
 // Module scope is fine here: session.start sets it again on every (re)load.
 let lang: Lang = 'en'
-const tr = () => STRINGS[lang]
+// A language that lacks a label shows it in English, so one added before or
+// after a new label never draws `undefined`.
+const withEnglish = new Map<Lang, (typeof STRINGS)['en']>()
+const tr = (): (typeof STRINGS)['en'] => {
+  let s = withEnglish.get(lang)
+  if (!s) {
+    s = { ...STRINGS.en, ...STRINGS[lang] } as (typeof STRINGS)['en']
+    withEnglish.set(lang, s)
+  }
+  return s
+}
 
 // Hebrew draws every row mirrored: crab and title on the right, numbers on the left.
 const isRtl = () => lang === 'he'
@@ -177,6 +266,7 @@ const blank = (): Flow => ({
   phase: 'plan',
   isFinished: false,
   tasks: [],
+  startedAt: 0,
 })
 
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
@@ -196,14 +286,37 @@ const cleanTasks = (tasks: ProgressInput['tasks']): PlannedTask[] | undefined =>
       title: (t.title ?? '').trim(),
       tier: tierName(t.tier ?? ''),
       after: (t.after ?? []).filter(n => Number.isInteger(n) && n > 0).slice(0, MAX_AFTER),
+      ...(STEP_STATUSES.includes(t.status as StepStatus) ? { status: t.status as StepStatus } : {}),
+      ...(t.summary?.trim() ? { summary: clip(t.summary.trim(), MAX_SUMMARY) } : {}),
+      ...(AVATAR_NAMES.includes(t.avatar?.trim().toLowerCase() ?? '') ? { avatar: t.avatar?.trim().toLowerCase() } : {}),
     }))
 
-const merge = (prev: Flow | null, input: ProgressInput): Flow => {
+// Steps the orchestrator works through itself carry a status; worker tasks do not.
+const stepsOf = (f: Flow | null): (PlannedTask & { n: number })[] =>
+  (f?.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => t.status)
+
+const activeSteps = (f: Flow): number => f.tasks.filter(t => t.status === 'active').length
+
+// The bar's crab dresses as the step being worked on, if any.
+const barCostume = (f: Flow): string => {
+  const step = f.isFinished ? undefined : f.tasks.find(t => t.status === 'active')
+  return step ? avatarOf(step) : 'other'
+}
+
+const merge = (prev: Flow | null, input: ProgressInput, at: number): Flow => {
   // A new title means a new flow: never carry counters over from an earlier one.
-  const base = isNewFlow(prev, input) || !prev ? blank() : { ...blank(), ...prev }
-  const tasks = cleanTasks(input.tasks) ?? base.tasks
+  const isNew = isNewFlow(prev, input) || !prev
+  const base = isNew ? { ...blank(), startedAt: at } : { ...blank(), ...prev }
+  // A step keeps the moment it became active across updates that resend it.
+  const wasActive = new Map(base.tasks.filter(t => t.status === 'active').map(t => [norm(t.title), t.activeSince]))
+  const cleaned = (cleanTasks(input.tasks) ?? base.tasks).map(t =>
+    t.status === 'active' ? { ...t, activeSince: wasActive.get(norm(t.title)) ?? at } : { ...t, activeSince: undefined },
+  )
+  // Closing the flow completes every step still open.
+  const tasks = input.finished ? cleaned.map(t => (t.status ? { ...t, status: 'done' as const } : t)) : cleaned
   const total = Math.min(MAX_TASKS, Math.max(0, Math.round(input.total ?? (input.tasks ? tasks.length : base.total))))
-  const done = Math.min(total || Infinity, Math.max(0, Math.round(input.done ?? base.done)))
+  const stepsDone = tasks.some(t => t.status) ? tasks.filter(t => t.status === 'done').length : undefined
+  const done = Math.min(total || Infinity, Math.max(0, Math.round(input.done ?? stepsDone ?? base.done)))
   const phase = input.phase && PHASES.includes(input.phase) ? input.phase : base.phase
   return {
     ...base,
@@ -213,6 +326,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
     phase: input.finished ? 'close' : phase,
     isFinished: input.finished === true,
     tasks,
+    endedAt: input.finished ? at : undefined,
   }
 }
 
@@ -271,7 +385,7 @@ const fitText = (s: string, size: number, maxW: number): string => {
   return out + '…'
 }
 
-const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
+const rowSvg = (f: Flow, W: number, isWorking: boolean, costume = 'other'): string => {
   // The title takes what it needs, up to 40% of the row; the bar takes the rest.
   const title = fitText(f.title, 13, Math.max(60, W * 0.4))
   const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
@@ -279,7 +393,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
   const color = f.isFinished ? DONE : ACCENT
   const y0 = (H - BAR_H) / 2
   const fillW = Math.round(BAR_W * ratio(f))
-  const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running)) / f.total) : 0
+  const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running + activeSteps(f))) / f.total) : 0
   const dots: string[] = []
   // Positions are worked out left to right; right to left mirrors each box
   // inside the bar (`bx`) and across the row (`rx`). Text is never mirrored.
@@ -343,7 +457,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle"${rtl ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
 <text class="m" ${percentAt} font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, rtl)}
+${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, costume, false, isWorking, 0.8, rtl)}
 </svg>`
 }
 
@@ -474,7 +588,7 @@ type Planned = PlannedTask & { n: number }
 const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   if (!f || f.isFinished) return []
   const started = new Set(list.map(a => norm(a.description)))
-  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(norm(t.title)))
+  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !t.status && !started.has(norm(t.title)))
 }
 
 const totals = (list: AgentRun[], at: number) => {
@@ -612,6 +726,15 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
 
 const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
 
+// A step without a chosen avatar gets one from its title, so it keeps the same
+// crab across updates and re-plans.
+const avatarOf = (p: Pick<PlannedTask, 'title' | 'avatar'>): string => {
+  if (p.avatar && AVATAR_NAMES.includes(p.avatar)) return AVATARS[p.avatar] ?? 'other'
+  let h = 0
+  for (const ch of norm(p.title)) h = (h * 31 + (ch.codePointAt(0) ?? 0)) >>> 0
+  return AVATARS[AVATAR_NAMES[h % AVATAR_NAMES.length] ?? ''] ?? 'other'
+}
+
 const CRAB_SCALE = 1.1
 
 // Body and props nest inside `bd` so a prop rides the bob and adds its own motion;
@@ -664,25 +787,271 @@ const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, 
 const svg = (W: number, H: number, body: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${CRAB_CSS}${body}</svg>`
 
-// The pane's own title already says "Agents": the header names the flow, if any.
-const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>): string => {
+type Tile = { k: string; v: string }
+
+// Subagent totals while any ran; otherwise the session's own figures, which are
+// the engine's and exact.
+const tilesOf = (list: AgentRun[], f: Flow | null, u: SessionFigures, at: number): Tile[] => {
   const s = tr()
+  if (list.length) {
+    const t = totals(list, at)
+    return [
+      { k: s.cost, v: '≈' + fmtCost(t.cost) },
+      { k: s.tokens, v: fmtTokens(t.tokens) },
+      { k: s.time, v: fmtTime(t.time) },
+    ]
+  }
+  const since = f?.startedAt ? (f.endedAt ?? Math.max(at, f.startedAt)) - f.startedAt : 0
+  return [
+    { k: s.apiCost, v: u.costUsd === undefined ? '—' : fmtCost(u.costUsd) },
+    { k: s.context, v: u.contextPercent === undefined ? '—' : `${Math.round(u.contextPercent)}%` },
+    { k: s.time, v: fmtTime(since) },
+  ]
+}
+
+// The session window first, then the weekly all-models one, then anything else.
+const LIMIT_ORDER = ['five_hour', 'seven_day']
+const limitsOf = (u: SessionFigures): LimitWindow[] =>
+  [...u.rateLimits].sort((a, b) => {
+    const ia = LIMIT_ORDER.indexOf(a.kind)
+    const ib = LIMIT_ORDER.indexOf(b.kind)
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)
+  })
+
+const limitName = (kind: string): string =>
+  kind === 'five_hour' ? tr().sessionLimit : kind === 'seven_day' ? tr().weeklyLimit : kind.replace(/_/g, ' ')
+
+const limitColor = (pct: number): string => (pct >= 90 ? '#D0453F' : pct >= 75 ? '#BA7517' : ACCENT)
+
+const fmtResets = (resetsAt: string | undefined, at: number): string => {
+  const ms = resetsAt ? Date.parse(resetsAt) - at : NaN
+  if (!(ms > 0)) return ''
+  const m = Math.ceil(ms / 60000)
+  const d = Math.floor(m / 1440)
+  const h = Math.floor((m % 1440) / 60)
+  const mm = m % 60
+  return `${tr().resetsIn} ${d ? `${d}d ${h}h` : h ? `${h}h ${mm}m` : `${mm}m`}`
+}
+
+const LIMIT_ROW = 54
+const limitRows = (n: number): number => Math.ceil(n / 2)
+
+// The pane's own title already says "Agents": the header names the flow, if any.
+const headerSvg = (W: number, title: string, tiles: Tile[], limits: LimitWindow[], at: number): string => {
   const gap = 6
   const tw = (W - gap * 2) / 3
   const top = title ? 28 : 0
-  const tile = (i: number, k: string, v: string) =>
+  const tile = (i: number, { k, v }: Tile) =>
     `<rect class="tile" x="${mx(W, i * (tw + gap), tw)}" y="${top}" width="${tw}" height="40" rx="8"/>
-<text class="s" ${startText(W, i * (tw + gap) + 9, top + 16)} font-family="${FONT}" font-size="11">${k}</text>
-<text class="t" ${startText(W, i * (tw + gap) + 9, top + 33, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
+<text class="s" ${startText(W, i * (tw + gap) + 9, top + 16)} font-family="${FONT}" font-size="11">${xml(k)}</text>
+<text class="t" ${startText(W, i * (tw + gap) + 9, top + 33, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${xml(v)}</text>`
+  const lw = (W - gap) / 2
+  const limit = (i: number, l: LimitWindow) => {
+    const x = (i % 2) * (lw + gap)
+    const y = top + 46 + Math.floor(i / 2) * LIMIT_ROW
+    const pct = Math.max(0, Math.min(100, l.percentUsed))
+    const barX = x + 58
+    const barW = Math.max(20, lw - 67)
+    const fillW = Math.round((barW * pct) / 100)
+    const resets = fmtResets(l.resetsAt, at)
+    const name = fitText(limitName(l.kind), 11, resets ? lw * 0.5 : lw - 18)
+    // In Hebrew the tile mirrors: name and percent on the right, the reset time and the bar's start on the left.
+    const fillX = isRtl() ? mx(W, barX, barW) + barW - fillW : barX
+    return `<rect class="tile" x="${mx(W, x, lw)}" y="${y}" width="${lw}" height="48" rx="8"/>
+<text class="s" ${startText(W, x + 9, y + 16)} font-family="${FONT}" font-size="11">${xml(name)}</text>
+${resets ? `<text class="m" ${endText(W, x + lw - 9, y + 16, true)} font-family="${FONT}" font-size="10.5" font-variant-numeric="tabular-nums">${xml(fitText(resets, 10.5, lw * 0.45))}</text>` : ''}
+<text class="t" ${startText(W, x + 9, y + 37, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${Math.round(pct)}%</text>
+<rect class="k" x="${mx(W, barX, barW)}" y="${y + 29}" width="${barW}" height="5" rx="2.5"/><rect x="${fillX}" y="${y + 29}" width="${fillW}" height="5" rx="2.5" fill="${limitColor(pct)}"/>`
+  }
   return svg(
     W,
-    headerHeight(title),
+    headerHeight(title, limits.length),
     `${title ? `<text class="t" ${startText(W, 0, 15)} font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>` : ''}
-${tile(0, s.cost, '≈' + fmtCost(t.cost))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
+${tiles.map((t, i) => tile(i, t)).join('')}${limits.map((l, i) => limit(i, l)).join('')}`,
   )
 }
 
-const headerHeight = (title: string): number => (title ? 72 : 44)
+const headerHeight = (title: string, limits = 0): number =>
+  (title ? 72 : 44) + (limits ? limitRows(limits) * LIMIT_ROW - 2 : 0)
+
+const tilesAlt = (tiles: Tile[], limits: LimitWindow[]): string =>
+  [...tiles.map(t => `${t.k} ${t.v}`), ...limits.map(l => `${limitName(l.kind)} ${Math.round(l.percentUsed)}%`)].join(', ')
+
+// --- steps the orchestrator works through itself.
+
+// An active step shows how long it has been going, so a slow one never looks frozen.
+const stepLabel = (p: Pick<PlannedTask, 'status' | 'activeSince'>, at: number): string =>
+  p.status === 'done'
+    ? tr().stepDone
+    : p.status === 'active'
+      ? `${tr().stepActive}${p.activeSince ? ` · ${fmtTime(at - p.activeSince)}` : ''}`
+      : tr().stepPending
+
+const stepColor = (status: StepStatus | undefined): string =>
+  status === 'done' ? '#3B9C5F' : status === 'active' ? ACCENT : '#9a9a96'
+
+// Up to `max` lines of `s`, word-wrapped to `maxW`.
+const wrapLines = (s: string, size: number, maxW: number, max: number): string[] => {
+  const lines: string[] = []
+  for (const w of s.split(/\s+/).filter(Boolean)) {
+    const last = lines[lines.length - 1]
+    if (last !== undefined && textWidth(`${last} ${w}`, size) <= maxW) lines[lines.length - 1] = `${last} ${w}`
+    else lines.push(w)
+  }
+  // Whatever runs past the last line ends it with an ellipsis.
+  const kept = lines.slice(0, max - 1)
+  const rest = lines.slice(max - 1)
+  return [...kept, ...(rest.length ? [rest.join(' ')] : [])].map(l => fitText(l, size, maxW))
+}
+
+// Up to two lines of a step's summary.
+const wrap2 = (s: string, size: number, maxW: number): string[] => wrapLines(s, size, maxW, 2)
+
+// Steps sit beside a crab, as agent rows do, and keep room for it without a summary.
+const STEP_X = 42
+const stepLines = (W: number, p: Planned): string[] => wrap2(p.summary ?? '', 11.5, W - STEP_X - 4)
+
+const stepHeight = (W: number, p: Planned): number => Math.max(46, 30 + stepLines(W, p).length * 15)
+
+const stepSvg = (W: number, p: Planned, at: number): string => {
+  const color = stepColor(p.status)
+  const tag = stepLabel(p, at)
+  const tagW = textWidth(tag, 11) + 4
+  const H = stepHeight(W, p)
+  const lines = stepLines(W, p)
+  const mark = statusMark(mx(W, W - 8), 14, p.status === 'active' ? 'running' : p.status === 'done' ? 'done' : 'planned', color)
+  // The active crab walks; a pending one waits, faded; a finished one stands still.
+  return svg(
+    W,
+    H,
+    `${rowCrab(W, 0, 6, avatarOf(p), p.status === 'pending', p.status === 'active')}${mark}
+<text class="${p.status === 'pending' ? 's' : 't'}" ${startText(W, STEP_X, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 13, W - STEP_X - tagW - 30))}</text>
+<text ${endText(W, W - 22, 18, true)} font-family="${FONT}" font-size="11" font-weight="500" fill="${color}">${xml(tag)}</text>
+${lines.map((l, i) => `<text class="s" ${startText(W, STEP_X, 35 + i * 15)} font-family="${FONT}" font-size="11.5">${xml(l)}</text>`).join('')}
+<line class="ln" x1="0" y1="${H - 0.5}" x2="${W}" y2="${H - 0.5}"/>`,
+  )
+}
+
+// --- background shell commands, followed through their output files.
+
+const BG_SILENT_MS = 60_000
+// What a background task's ID looks like; anything else did not come from the engine.
+const BG_ID = /^[A-Za-z0-9_-]{1,64}$/
+const BG_READ_MAX = 4 * 1024 * 1024
+const BG_KEEP_DONE = 5
+
+// The last thing a command printed, with terminal colour codes and carriage
+// returns (progress bars redrawing one line) resolved to what a terminal shows.
+const outputLines = (text: string): string[] =>
+  text
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
+    .split('\n')
+    .map(l => l.split('\r').filter(Boolean).pop() ?? '')
+    .map(l => l.trim())
+    .filter(Boolean)
+
+// The line the engine appends when a background command ends.
+const endOf = (line: string): BackgroundStatus | undefined => {
+  const exit = /^\[exited with code (-?\d+)\]$/.exec(line)
+  if (exit) return exit[1] === '0' ? 'completed' : 'failed'
+  return /^\[(killed|stopped|terminated)\]$/i.test(line) ? 'killed' : undefined
+}
+
+// Progress the output reports itself: the latest `n/m`, `n of m` or `n%`.
+const progressIn = (text: string): number | undefined => {
+  const tail = text.slice(-4000)
+  let best: { at: number; value: number } | undefined
+  for (const m of tail.matchAll(/(\d[\d,]*)\s*(?:\/|of)\s*(\d[\d,]*)/g)) {
+    const n = Number((m[1] ?? '').replace(/,/g, ''))
+    const total = Number((m[2] ?? '').replace(/,/g, ''))
+    if (total > 1 && n <= total && (m.index ?? 0) >= (best?.at ?? -1)) best = { at: m.index ?? 0, value: n / total }
+  }
+  for (const m of tail.matchAll(/(\d{1,3}(?:\.\d+)?)\s?%/g)) {
+    const pct = Number(m[1])
+    if (pct <= 100 && (m.index ?? 0) >= (best?.at ?? -1)) best = { at: m.index ?? 0, value: pct / 100 }
+  }
+  return best?.value
+}
+
+const bgStatusLabel = (b: BackgroundTask): string => {
+  const s = tr()
+  return b.status === 'completed' ? s.bgCompleted : b.status === 'failed' ? s.bgFailed : b.status === 'killed' ? s.bgKilled : s.bgRunning
+}
+
+const bgMark = (b: BackgroundTask): string =>
+  b.status === 'running' ? 'running' : b.status === 'completed' ? 'done' : 'failed'
+
+const isSilent = (b: BackgroundTask, at: number): boolean =>
+  b.status === 'running' && at - (b.lastOutputAt ?? b.startedAt) > BG_SILENT_MS
+
+// What the row says under its title: the latest output, or how long it has been quiet.
+const bgDetail = (b: BackgroundTask, at: number): string => {
+  if (isSilent(b, at)) return `${tr().silentFor} ${fmtTime(at - (b.lastOutputAt ?? b.startedAt))}${b.lastLine ? ` · ${b.lastLine}` : ''}`
+  return b.lastLine || (b.status === 'running' ? tr().waitingOutput : '')
+}
+
+const bgElapsed = (b: BackgroundTask, at: number): number => (b.endedAt ?? Math.max(at, b.startedAt)) - b.startedAt
+
+// The description gets the row's full width and up to three lines, so a long one
+// (often where the progress hint lives) is read, not cut.
+const bgTitleLines = (W: number, b: BackgroundTask): string[] => wrapLines(b.label, 13, W - 24, 3)
+
+const bgHeight = (W: number, b: BackgroundTask): number => 56 + (bgTitleLines(W, b).length - 1) * 16
+
+const bgSvg = (W: number, b: BackgroundTask, at: number): string => {
+  const silent = isSilent(b, at)
+  const color = b.status === 'failed' || b.status === 'killed' ? '#D0453F' : b.status === 'completed' ? '#3B9C5F' : silent ? '#BA7517' : ACCENT
+  // A finished row says how it ended beside its time; a running one, its progress.
+  const right =
+    b.status === 'running'
+      ? `${b.progress !== undefined ? `${Math.round(b.progress * 100)}% · ` : ''}${fmtTime(bgElapsed(b, at))}`
+      : `${bgStatusLabel(b)} · ${fmtTime(bgElapsed(b, at))}`
+  const rightW = textWidth(right, 11) + 4
+  const barW = W - 24
+  const title = bgTitleLines(W, b)
+  const dy = (title.length - 1) * 16
+  const H = bgHeight(W, b)
+  const fill = b.status === 'completed' ? 1 : b.progress
+  // Without a reported figure a running command gets a sweeping bar: alive, amount
+  // unknown. It sweeps only while output keeps coming; a quiet one holds still.
+  // One second a sweep, as the once-a-second redraw restarts it.
+  const sweepW = Math.round(barW * 0.3)
+  const fillW = fill !== undefined ? Math.round(barW * fill) : 0
+  // The bar fills from its start: the left edge, or the right in Hebrew.
+  const bar =
+    fill !== undefined
+      ? `<rect x="${mx(W, 24, fillW)}" y="${44 + dy}" width="${fillW}" height="4" rx="2" fill="${color}"/>`
+      : b.status === 'running' && !silent
+        ? `<rect x="${mx(W, 24, sweepW)}" y="${44 + dy}" width="${sweepW}" height="4" rx="2" fill="${color}"><animate attributeName="x" values="${mx(W, 24, sweepW)};${mx(W, 24 + barW - sweepW, sweepW)};${mx(W, 24, sweepW)}" dur="1s" repeatCount="indefinite"/></rect>`
+        : ''
+  return svg(
+    W,
+    H,
+    `${statusMark(mx(W, 9), 14, bgMark(b), color)}
+${title.map((l, i) => `<text class="t" ${startText(W, 24, 18 + i * 16)} font-family="${FONT}" font-size="13" font-weight="600">${xml(l)}</text>`).join('')}
+<text ${startText(W, 24, 35 + dy)} font-family="${FONT}" font-size="11.5"${silent ? ` fill="${color}"` : ' class="s"'}>${xml(fitText(bgDetail(b, at), 11.5, W - 24 - rightW - 10))}</text>
+<text class="s" ${endText(W, W, 35 + dy)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(right)}</text>
+${b.status === 'running' || b.status === 'completed' ? `<rect class="k" x="${mx(W, 24, barW)}" y="${44 + dy}" width="${barW}" height="4" rx="2"/>` : ''}${bar}
+<line class="ln" x1="0" y1="${H - 0.5}" x2="${W}" y2="${H - 0.5}"/>`,
+  )
+}
+
+// Running commands first, then the most recent finished ones.
+const bgShown = (list: BackgroundTask[]): BackgroundTask[] => [
+  ...list.filter(b => b.status === 'running'),
+  ...list.filter(b => b.status !== 'running').slice(-BG_KEEP_DONE).reverse(),
+]
+
+// The status line names what runs in the background, so it shows without the panel.
+const bgStatusLine = (list: BackgroundTask[], at: number): string | undefined => {
+  const running = list.filter(b => b.status === 'running')
+  const b = running[0]
+  if (!b) return undefined
+  const more = running.length > 1 ? ` +${running.length - 1}` : ''
+  const pct = b.progress !== undefined ? ` · ${Math.round(b.progress * 100)}%` : ''
+  // The numbers first: a narrow status line cuts the name, not the time.
+  return `⏳ ${fmtTime(bgElapsed(b, at))}${pct}${more} · ${clip(b.label, 48)}`
+}
 
 // The task's own progress when the worker reports steps; a finished run is full.
 const progressOf = (a: AgentRun): number | null => {
@@ -783,6 +1152,61 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   return true
 }
 
+async function storeUsage(
+  $: EngineInterface,
+  u: { rateLimits: LimitWindow[]; cost?: { usd: number }; context: { percent?: number } },
+): Promise<void> {
+  await update($, usage, () => ({
+    rateLimits: u.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
+    costUsd: u.cost?.usd,
+    contextPercent: u.context.percent,
+  }))
+}
+
+// Reads what the running background commands printed since the last look: the
+// last line and any progress figure. `only` limits it to one command.
+async function followOutput($: EngineInterface, at: number, only?: string): Promise<void> {
+  const list = await read($, bgCommands)
+  for (const b of list) {
+    if (b.status !== 'running' || !b.outputFile || (only && b.id !== only)) continue
+    // A row that already read its end line (before this check existed) ends now.
+    const seenEnd = endOf(b.lastLine ?? '')
+    if (seenEnd) {
+      await update($, bgCommands, all =>
+        all.map(x => (x.id === b.id ? { ...x, status: seenEnd, endedAt: x.lastOutputAt ?? at } : x)),
+      )
+      continue
+    }
+    try {
+      const { size, mtimeMs } = await $.fs.stat(b.outputFile)
+      if (size === b.outputBytes) continue
+      // Past the read limit the size still proves it is alive; the text stays as it was.
+      const text = size <= BG_READ_MAX ? await $.fs.read(b.outputFile) : undefined
+      const lines = text === undefined ? [] : outputLines(text)
+      // The engine closes the file with `[exited with code N]` or `[killed]`: the
+      // command is over whether or not its notification ever reaches a hook.
+      const ended = endOf(lines[lines.length - 1] ?? '')
+      const shown = ended ? lines.slice(0, -1) : lines
+      const line = shown[shown.length - 1] || b.lastLine
+      const progress = text === undefined ? b.progress : (progressIn(shown.join('\n')) ?? b.progress)
+      const endedAt = mtimeMs > b.startedAt ? Math.min(at, mtimeMs) : at
+      await update($, bgCommands, all =>
+        all.map(x =>
+          x.id === b.id
+            ? { ...x, outputBytes: size, lastOutputAt: at, lastLine: line, progress, ...(ended ? { status: ended, endedAt } : {}) }
+            : x,
+        ),
+      )
+    } catch {
+      // Not written yet: try again next tick. Gone a minute in (cleaned up, or its
+      // session ended): the command is not running any more.
+      if (at - b.startedAt > 60_000 && !(await $.fs.exists(b.outputFile).catch(() => false))) {
+        await update($, bgCommands, all => all.map(x => (x.id === b.id ? { ...x, status: 'killed' as const, endedAt: at } : x)))
+      }
+    }
+  }
+}
+
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
   const p = await read($, panel)
   if (p.autoOpenedFor === key) return
@@ -800,7 +1224,9 @@ export const register: Register = (on, options) => {
         'Report /savvy-flow progress to the progress bar above the prompt and the agents panel. ' +
         'Call it after presenting the plan (title, total, tasks, phase "delegate"), each time a task is accepted (done), ' +
         'when switching phase or re-planning (tasks), and once at the end with finished: true. Fields left out keep their previous value. ' +
-        'For the main session only: a call from a subagent is ignored (workers report with `step`).',
+        'For the main session only: a call from a subagent is ignored (workers report with `step`). ' +
+        'Working without subagents: give each task a `status` and a one-sentence `summary` and resend the full `tasks` list as steps start and finish; ' +
+        '`done` is then counted from the statuses.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -819,8 +1245,20 @@ export const register: Register = (on, options) => {
                 title: { type: 'string', description: 'A few words; reused verbatim as the Agent description.' },
                 tier: { type: 'string', enum: [...TIERS] },
                 after: { type: 'array', items: { type: 'integer' }, description: 'Numbers of the tasks this one waits for.' },
+                status: {
+                  type: 'string',
+                  enum: [...STEP_STATUSES],
+                  description: 'Only for steps you do yourself, without a subagent: pending, active (working on it) or done.',
+                },
+                summary: { type: 'string', description: 'One sentence: what the step does, or what it did once done.' },
+                avatar: {
+                  type: 'string',
+                  enum: AVATAR_NAMES,
+                  description:
+                    'Optional, for steps you do yourself: the crab that shows the step in the panel. detective to investigate, engineer to build or fix, chef to prepare or assemble, racer for quick checks and tests, pirate to explore, astronaut for research or design. Picked from the title when left out.',
+                },
               },
-              required: ['title', 'tier'],
+              required: ['title'],
             },
           },
         },
@@ -849,16 +1287,97 @@ export const register: Register = (on, options) => {
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
     })
 
-    // Ticks the running agents' clocks; quiet when nothing runs.
+    // Ticks the running agents', steps' and background commands' clocks, and
+    // follows the commands' output; quiet when nothing runs.
     $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        const f = await read($, flow)
+        const bg = await read($, bgCommands)
+        const isBgRunning = bg.some(b => b.status === 'running')
+        if (!list.some(a => a.status === 'running') && !(f && !f.isFinished && activeSteps(f)) && !isBgRunning) return
         const at = await $.clock.now()
+        if (isBgRunning) await followOutput($, at)
         await update($, now, () => at)
+        $.ui.status(bgStatusLine(await read($, bgCommands), at))
       })()
     })
+
+    try {
+      await storeUsage($, await $.session.usage())
+    } catch {
+      // No figures yet: session.measure brings them after the first turn.
+    }
+    // A running row with no ID or output file the engine would give was never a
+    // command (an earlier version read them out of any command's output text): it goes.
+    await update($, bgCommands, list => list.filter(b => b.status !== 'running' || (BG_ID.test(b.id) && b.outputFile?.startsWith('/'))))
     return started
+  })
+
+  // The session's limits, cost and context, pushed after each turn.
+  on('session.measure', async ($, e, next) => {
+    await storeUsage($, e)
+    return next(e)
+  })
+
+  // A shell command that went to the background, asked for or after its timeout:
+  // its result names the task and the file its output goes to.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const result = await next(e)
+    // Only the engine's own record says a command went to the background. The
+    // text is the command's output and may say anything, this hook's source included.
+    const record = (result.deny === undefined ? result.result : undefined) as { backgroundTaskId?: unknown } | undefined
+    const id = typeof record?.backgroundTaskId === 'string' && BG_ID.test(record.backgroundTaskId) ? record.backgroundTaskId : undefined
+    if (!id) return result
+    const text = 'text' in result && typeof result.text === 'string' ? result.text : ''
+    const input = e as unknown as { command?: string; description?: string }
+    const at = await $.clock.now()
+    const task: BackgroundTask = {
+      id,
+      label: input.description?.trim() || clip((input.command ?? '').trim(), 60) || id,
+      outputFile: /Output is being written to: (\/\S+?)\.?(?:\s|$)/.exec(text)?.[1],
+      status: 'running',
+      startedAt: at,
+      outputBytes: 0,
+    }
+    await update($, bgCommands, list => [...list.filter(b => b.id !== id), task].slice(-20))
+    await update($, now, () => at)
+    $.ui.status(bgStatusLine(await read($, bgCommands), at))
+    return result
+  })
+
+  // Stopping a task by hand ends its row at once.
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    const result = await next(e)
+    const input = e as unknown as { task_id?: string; shell_id?: string }
+    const id = input.task_id ?? input.shell_id
+    if (id) {
+      const at = await $.clock.now()
+      await update($, bgCommands, list =>
+        list.map(b => (b.id === id && b.status === 'running' ? { ...b, status: 'killed' as const, endedAt: at } : b)),
+      )
+      $.ui.status(bgStatusLine(await read($, bgCommands), at))
+    }
+    return result
+  })
+
+  // The engine announces a finished background task as a notification turn. The
+  // matcher says so up front, so the module's other prompt.submit hooks can sit beside it.
+  on('prompt.submit', { origin: { kind: 'task-notification' } }, async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') {
+      const id = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]?.trim()
+      const word = /<status>([^<]+)<\/status>/.exec(e.text)?.[1]?.trim().toLowerCase() ?? ''
+      const bg = id ? await read($, bgCommands) : []
+      if (id && bg.some(b => b.id === id && b.status === 'running')) {
+        const at = await $.clock.now()
+        await followOutput($, at, id)
+        const status: BackgroundStatus = word === 'completed' ? 'completed' : word === 'killed' ? 'killed' : 'failed'
+        await update($, bgCommands, list => list.map(b => (b.id === id ? { ...b, status, endedAt: at } : b)))
+        await update($, now, () => at)
+        $.ui.status(bgStatusLine(await read($, bgCommands), at))
+      }
+    }
+    return next(e)
   })
 
   on('command.run', { command: 'agents-info' }, async ($, e) => {
@@ -883,7 +1402,10 @@ export const register: Register = (on, options) => {
       // A new flow starts with a clean list; agents still running stay.
       await update($, agents, list => list.filter(a => a.status === 'running'))
     }
-    const next = await update($, flow, p => merge(p, input))
+    // A host with no clock (a test kit, say) still takes the report: step times then stand at the last tick.
+    const at = await $.clock.now().catch(() => read($, now))
+    await update($, now, () => at)
+    const next = await update($, flow, p => merge(p, input, at))
     if (next && input.tasks?.length) await autoOpen($, next.title)
     return { result: `ok: ${label(next ?? blank())}` }
   })
@@ -973,7 +1495,7 @@ export const register: Register = (on, options) => {
               ...a,
               model,
               effort: typeof e.effort === 'string' ? e.effort : a.effort,
-              status: 'running',
+              status: 'running' as const,
               endedAt: undefined,
               contextTokens:
                 (usage.input_tokens || 0) +
@@ -1006,7 +1528,7 @@ export const register: Register = (on, options) => {
           const fallback = a.steps === 0 && e.usage
           return {
             ...a,
-            status: e.reason === 'answer' ? 'done' : 'failed',
+            status: e.reason === 'answer' ? ('done' as const) : ('failed' as const),
             endedAt: at,
             ...(fallback && e.usage
               ? {
@@ -1034,12 +1556,22 @@ export const register: Register = (on, options) => {
     const list = await read($, agents)
     const f = await read($, flow)
     const p: Panel = await read($, panel)
+    const u = await read($, usage)
+    const clockAt = await $.clock.now().catch(() => read($, now))
     const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
     const planned = plannedOf(f, list)
+    const steps = stepsOf(f)
     const t = totals(list, at)
+    const tiles = tilesOf(list, f, u, Math.max(at, clockAt))
+    const limits = limitsOf(u)
+    const stepsHeader = `${s.steps} · ${steps.filter(p => p.status === 'done').length}/${steps.length}`
+    const liveAt = Math.max(at, clockAt)
+    const bg = bgShown(await read($, bgCommands))
+    const bgRunning = bg.filter(b => b.status === 'running').length
+    const bgHeader = `${s.background} · ${bgRunning ? `${bgRunning} ${s.bgRunning}` : bg.length}`
     // The pane's title says "Agents"; inside, only the flow's own name.
     const title = f && !f.isFinished ? f.title : ''
 
@@ -1059,8 +1591,8 @@ export const register: Register = (on, options) => {
         onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
       />
     )
-    const isEmpty = list.length === 0 && planned.length === 0
-    const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
+    const isEmpty = list.length === 0 && planned.length === 0 && steps.length === 0 && bg.length === 0
+    const summary = tilesAlt(tiles, limits)
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
@@ -1083,7 +1615,14 @@ export const register: Register = (on, options) => {
       }
       const shownDone = p.isDoneCollapsed ? 0 : finished.length
       const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      const sections = (steps.length > 0 ? 1 : 0) + (bg.length > 0 ? 1 : 0)
+      const gridH =
+        headerHeight(title, limits.length) +
+        (lines + sections) * LINE_H +
+        steps.reduce((h, st) => h + stepHeight(W, st), 0) +
+        bg.reduce((h, b) => h + bgHeight(W, b), 0) +
+        (running.length + shownDone) * 66 +
+        planned.length * 46
       return (
         <Box flexDirection="column">
           {/* The grid sizes the pane; the content is placed over it, as an
@@ -1092,9 +1631,34 @@ export const register: Register = (on, options) => {
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
-            <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
+            <Svg
+              source={headerSvg(W, title, tiles, limits, clockAt)}
+              alt={title ? `${title}: ${summary}` : summary}
+              width={W}
+              height={headerHeight(title, limits.length)}
+            />
             {toggleCompact}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
+            {steps.length > 0 && section('h-steps', stepsHeader)}
+            {steps.map(p => (
+              <Svg
+                key={`step-${p.n}`}
+                source={stepSvg(W, p, liveAt)}
+                alt={`${p.n}. ${p.title}: ${stepLabel(p, liveAt)}${p.summary ? `. ${p.summary}` : ''}`}
+                width={W}
+                height={stepHeight(W, p)}
+              />
+            ))}
+            {bg.length > 0 && section('h-bg', bgHeader)}
+            {bg.map(b => (
+              <Svg
+                key={`bg-${b.id}`}
+                source={bgSvg(W, b, liveAt)}
+                alt={`${b.label}: ${bgStatusLabel(b)}, ${fmtTime(bgElapsed(b, liveAt))}. ${bgDetail(b, liveAt)}`}
+                width={W}
+                height={bgHeight(W, b)}
+              />
+            ))}
             {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
             {running.map(a => (
               <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
@@ -1157,9 +1721,15 @@ export const register: Register = (on, options) => {
           </Text>
           {toggleCompact}
         </Box>
-        <Text dimColor>
-          ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
-        </Text>
+        <Text dimColor wrap="truncate-end">{tiles.map(x => `${x.k} ${x.v}`).join(' · ')}</Text>
+        {limits.map(l => (
+          <Text key={`limit-${l.kind}`} wrap="truncate-end">
+            <Text dimColor>{limitName(l.kind)} </Text>
+            <Text color={limitColor(l.percentUsed)}>{ctxBar(Math.min(100, l.percentUsed), Math.max(6, Math.min(16, cols - 40)))}</Text>
+            <Text> {Math.round(l.percentUsed)}%</Text>
+            <Text dimColor> {fmtResets(l.resetsAt, clockAt)}</Text>
+          </Text>
+        ))}
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
@@ -1176,6 +1746,53 @@ export const register: Register = (on, options) => {
         ) : (
           <Box flexDirection="column" marginTop={1}>
             {isEmpty && <Text dimColor>{s.empty}</Text>}
+            {steps.length > 0 && <Text dimColor>{stepsHeader}</Text>}
+            {steps.map(pl => (
+              <Box key={`step-${pl.n}`} flexDirection="column" marginBottom={1}>
+                <Box flexDirection="row" gap={1}>
+                  <Text color={stepColor(pl.status)}>{STATUS_GLYPH[pl.status === 'active' ? 'running' : pl.status === 'done' ? 'done' : 'planned']}</Text>
+                  <Text bold={pl.status !== 'pending'} dimColor={pl.status === 'pending'} wrap="truncate-end">
+                    {pl.n}. {pl.title}
+                  </Text>
+                  <Text color={stepColor(pl.status)}>{stepLabel(pl, liveAt)}</Text>
+                </Box>
+                {pl.summary ? (
+                  <Text dimColor wrap="wrap">
+                    {'  '}
+                    {pl.summary}
+                  </Text>
+                ) : null}
+              </Box>
+            ))}
+            {bg.length > 0 && <Text dimColor>{bgHeader}</Text>}
+            {bg.map(b => {
+              const color = b.status === 'completed' ? 'green' : b.status === 'running' ? (isSilent(b, liveAt) ? 'yellow' : ACCENT) : 'red'
+              const pct = b.progress !== undefined && b.status === 'running' ? `${Math.round(b.progress * 100)}% · ` : ''
+              return (
+                <Box key={`bg-${b.id}`} flexDirection="column" marginBottom={1}>
+                  <Box flexDirection="row" gap={1}>
+                    <Text color={color}>{STATUS_GLYPH[bgMark(b)]}</Text>
+                    <Text bold wrap="wrap">
+                      {b.label}
+                    </Text>
+                    <Text dimColor>
+                      {b.status === 'running' ? pct : `${bgStatusLabel(b)} · `}
+                      {fmtTime(bgElapsed(b, liveAt))}
+                    </Text>
+                  </Box>
+                  {b.progress !== undefined && b.status === 'running' ? (
+                    <Text color={color}>
+                      {'  '}
+                      {ctxBar(b.progress * 100, barW)}
+                    </Text>
+                  ) : null}
+                  <Text dimColor={!isSilent(b, liveAt)} color={isSilent(b, liveAt) ? 'yellow' : undefined} wrap="truncate-end">
+                    {'  '}
+                    {bgDetail(b, liveAt)}
+                  </Text>
+                </Box>
+              )
+            })}
             {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
             {running.map(row)}
             {finished.length > 0 && toggleDone}
@@ -1214,9 +1831,12 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = ui
     const list = await read($, agents)
     const crew = list.length + plannedOf(f, list).length
-    const isWorking = list.some(a => a.status === 'running')
+    const isWorking =
+      list.some(a => a.status === 'running') ||
+      (!f.isFinished && activeSteps(f) > 0) ||
+      (await read($, bgCommands)).some(b => b.status === 'running')
     const crewButton = (
-      <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
+      <Button key="savvy-agents" label={crew ? `×${crew}` : tr().details} plain onPress={() => void togglePane($)} />
     )
     const percent = `${Math.round(ratio(f) * 100)}%`
     const dismiss = (
@@ -1238,7 +1858,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+            <Svg source={rowSvg(f, width, isWorking, barCostume(f))} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
             {crewButton}
             {dismiss}
           </Box>
