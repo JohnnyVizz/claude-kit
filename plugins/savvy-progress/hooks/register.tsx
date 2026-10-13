@@ -445,6 +445,23 @@ const tierOf = (type: string): string => {
   return Object.hasOwn(TIER_COLOR, t) && bare.startsWith('savvy-') ? t : 'other'
 }
 
+// What Opus at each effort looks like: the savvy tier that runs on it.
+const OPUS_LOOK: Record<string, string> = { max: 'heavy', xhigh: 'heavy', high: 'careful', medium: 'medium', low: 'light' }
+
+// The costume and color of a run. A savvy worker wears its tier's. Any other subagent
+// wears the tier its model and effort match, so a session that delegates without
+// savvy-flow reads the same way: Fable the astronaut, Opus by its effort, Sonnet the
+// chef, Haiku the racer. Opus with no effort seen yet stays plain.
+const lookOf = (a: Pick<AgentRun, 'type' | 'model' | 'effort'>): string => {
+  const tier = tierOf(a.type)
+  if (tier !== 'other' || a.type === 'Explore') return tier
+  if (/fable|mythos/i.test(a.model)) return 'fable'
+  if (/opus/i.test(a.model)) return OPUS_LOOK[a.effort ?? ''] ?? 'other'
+  if (/sonnet/i.test(a.model)) return 'medium'
+  if (/haiku/i.test(a.model)) return 'light'
+  return 'other'
+}
+
 const modelName = (id: string): string => {
   const m = /(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/i.exec(id)
   const [, family = '', major = '', minor] = m ?? []
@@ -610,7 +627,7 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
   other: f => crabBody(f),
 }
 
-const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
+const costumeOf = (a: Pick<AgentRun, 'type' | 'model' | 'effort'>): string => (a.type === 'Explore' ? 'explore' : lookOf(a))
 
 const CRAB_SCALE = 1.1
 
@@ -696,7 +713,7 @@ const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round(
 const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const s = tr()
   const tier = tierOf(a.type)
-  const color = colorOf(tier)
+  const color = colorOf(lookOf(a))
   const ctx = ctxOf(a)
   const textW = W - 42 - 22
   const meta = [runModel(a)]
@@ -712,7 +729,7 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   return svg(
     W,
     66,
-    `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
+    `${rowCrab(W, 0, 14, costumeOf(a), false, a.status === 'running')}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
@@ -742,8 +759,8 @@ ${statusMark(mx(W, W - 8), 16, 'planned', color)}
 
 const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>): string => {
   const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
+    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a), c: colorOf(lookOf(a)), s: 'running', dim: false })),
+    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a), c: colorOf(lookOf(a)), s: a.status, dim: false })),
     ...planned.map(p => ({ k: p.tier in TIER_COLOR ? p.tier : 'other', c: colorOf(p.tier), s: 'planned', dim: true })),
   ]
   const fit = Math.max(1, Math.floor((W - 150) / 36))
@@ -1118,7 +1135,7 @@ export const register: Register = (on, options) => {
     const barW = Math.max(6, Math.min(20, cols - 34))
     const row = (a: AgentRun) => {
       const tier = tierOf(a.type)
-      const color = colorOf(tier)
+      const color = colorOf(lookOf(a))
       const ctx = ctxOf(a)
       const progress = progressOf(a)
       const model = runModel(a)
@@ -1163,7 +1180,7 @@ export const register: Register = (on, options) => {
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
-              <Text key={a.id} color={colorOf(tierOf(a.type))}>
+              <Text key={a.id} color={colorOf(lookOf(a))}>
                 {STATUS_GLYPH[a.status]}{' '}
               </Text>
             ))}
