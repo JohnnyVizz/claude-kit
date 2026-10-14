@@ -12,23 +12,13 @@
       "type": "string",
       "title": "Panel language",
       "description": "auto follows Claude Code's language setting, then the system locale; en, ru or he (Hebrew, drawn right to left)",
-      "default": "auto",
-      "options": [
-        "auto",
-        "en",
-        "ru",
-        "he"
-      ]
+      "default": "auto"
     },
     "autoOpen": {
       "type": "string",
       "title": "Open the agents panel",
       "description": "savvy: when a savvy-flow worker starts or a plan is reported; any: also when any other subagent starts",
-      "default": "savvy",
-      "options": [
-        "savvy",
-        "any"
-      ]
+      "default": "savvy"
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
