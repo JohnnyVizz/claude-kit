@@ -11,6 +11,7 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const bandHiddenAt = atom({ plugin: 'savvy-progress', key: 'bandHiddenAt' } as const, 0)
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -178,6 +179,20 @@ const blank = (): Flow => ({
   isFinished: false,
   tasks: [],
 })
+
+// With `bar: any` and no flow reported, the bar counts the session's own subagents.
+const agentsFlow = (list: AgentRun[]): Flow => {
+  const running = list.filter(a => a.status === 'running').length
+  return {
+    ...blank(),
+    title: tr().pane,
+    total: list.length,
+    done: list.length - running,
+    running,
+    phase: 'delegate',
+    isFinished: running === 0,
+  }
+}
 
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
   !prev || prev.isFinished || (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
@@ -1203,8 +1218,12 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const f = await read($, flow)
-    if (f === null || e.props.hasSurvey) return next(e)
+    if (e.props.hasSurvey) return next(e)
+    const reported = await read($, flow)
+    const list = await read($, agents)
+    const isAgentsOnly = reported === null
+    if (isAgentsOnly && (options.bar !== 'any' || list.length <= (await read($, bandHiddenAt)))) return next(e)
+    const f = reported ?? agentsFlow(list)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
@@ -1212,7 +1231,6 @@ export const register: Register = (on, options) => {
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const list = await read($, agents)
     const crew = list.length + plannedOf(f, list).length
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = (
@@ -1225,7 +1243,7 @@ export const register: Register = (on, options) => {
         label="✕"
         plain
         role="dismiss"
-        onPress={() => update($, flow, () => null)}
+        onPress={() => (isAgentsOnly ? update($, bandHiddenAt, () => list.length) : update($, flow, () => null))}
       />
     )
 

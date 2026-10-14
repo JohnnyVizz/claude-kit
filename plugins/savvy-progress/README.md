@@ -22,4 +22,6 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 
 `autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
 
+`bar`: `savvy` (default) or `any`. With `savvy` the bar above the prompt appears once a flow reports progress or a `savvy-*` worker starts. With `any` it also appears when any other subagent starts, titled Agents and counting the session's subagents finished out of started; its ✕ hides it until the next subagent starts. A reported flow takes the bar over either way.
+
 Install instructions are in the [repository README](../../README.md).
