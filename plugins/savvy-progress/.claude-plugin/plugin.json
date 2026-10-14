@@ -29,6 +29,16 @@
         "savvy",
         "any"
       ]
+    },
+    "position": {
+      "type": "string",
+      "title": "Progress row position",
+      "description": "Where the progress row sits among other mods' bands above the prompt: above them, or below them",
+      "default": "above",
+      "options": [
+        "above",
+        "below"
+      ]
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
