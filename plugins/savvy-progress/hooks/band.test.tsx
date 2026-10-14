@@ -31,3 +31,30 @@ test('desktop: the row is still one Svg', async ($, on) => {
   await session($, on)
   expect(await band($, 'desktop')).toEqual({ svg: 1, title: 0, label: 0 })
 })
+
+// Another mod's band, drawn by a handler after this mod's in the chain.
+function otherBand(on: On) {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>Other band</Text>
+  })
+}
+
+test('position above (default): the progress row comes before the other mods\' bands', async ($, on) => {
+  otherBand(on)
+  await session($, on)
+  const ui = await $.ui.mount({ plugin: 'savvy-progress', surface: 'terminal', ...BAND })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  await ui.unmount()
+  expect(texts.indexOf('Ship it')).toBeLessThan(texts.indexOf('Other band'))
+})
+
+test('position below: the other mods\' bands come before the progress row', { options: { position: 'below' } }, async ($, on) => {
+  otherBand(on)
+  await session($, on)
+  const ui = await $.ui.mount({ plugin: 'savvy-progress', surface: 'terminal', ...BAND })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  await ui.unmount()
+  expect(texts.indexOf('Other band')).toBeGreaterThanOrEqual(0)
+  expect(texts.indexOf('Other band')).toBeLessThan(texts.indexOf('Ship it'))
+})

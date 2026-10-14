@@ -1205,10 +1205,11 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
     if (f === null || e.props.hasSurvey) return next(e)
-    // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
-    // never nested: the desktop drops a band that nests it.
+    // Draw this row with the other mods' bands beneath it, or above it with `position: below`. Claude Code's own
+    // placeholder ({ type: 'engine' }) is never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
-    const below = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
+    const others = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
+    const isBelow = options.position === 'below'
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
@@ -1237,12 +1238,13 @@ export const register: Register = (on, options) => {
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
         <Box flexDirection="column">
+          {isBelow ? others : null}
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
             <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
             {crewButton}
             {dismiss}
           </Box>
-          {below}
+          {isBelow ? null : others}
         </Box>
       )
     }
@@ -1252,6 +1254,7 @@ export const register: Register = (on, options) => {
     const width = Math.max(6, Math.min(40, cols - titleW - 32))
     return (
       <Box flexDirection="column">
+        {isBelow ? others : null}
         <Box flexDirection="row" gap={2}>
           <Box width={titleW} flexShrink={0}>
             <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
@@ -1264,7 +1267,7 @@ export const register: Register = (on, options) => {
           {crewButton}
           {dismiss}
         </Box>
-        {below}
+        {isBelow ? null : others}
       </Box>
     )
   })
