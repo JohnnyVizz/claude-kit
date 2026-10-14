@@ -53,6 +53,8 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       now: number
+      /** Subagent count when the agents bar was dismissed; it comes back when another starts. */
+      bandHiddenAt: number
     }
   }
 }

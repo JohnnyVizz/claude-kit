@@ -29,6 +29,16 @@
         "savvy",
         "any"
       ]
+    },
+    "bar": {
+      "type": "string",
+      "title": "Progress bar above the prompt",
+      "description": "savvy: once a flow reports progress or a savvy-flow worker starts; any: also when any other subagent starts, counting the session's subagents",
+      "default": "savvy",
+      "options": [
+        "savvy",
+        "any"
+      ]
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
