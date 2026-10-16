@@ -27,7 +27,23 @@ test('terminal: the row draws the title, bar and label as text, not an Svg', asy
   expect(await band($, 'terminal')).toEqual({ svg: 0, title: 1, label: 1 })
 })
 
-test('desktop: the row is still one Svg', async ($, on) => {
+// Title, track, figures and crab are four drawings laid out by the band's flex row; no Text.
+test('desktop: the bar is four drawings: title, track, figures, crab', async ($, on) => {
   await session($, on)
-  expect(await band($, 'desktop')).toEqual({ svg: 1, title: 0, label: 0 })
+  expect(await band($, 'desktop')).toEqual({ svg: 4, title: 0, label: 0 })
+})
+
+// Another mod's band beneath this one sits a small gap below it.
+test('desktop: a gap separates the bar from the band beneath it', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text key="other-mod">Other mod</Text>
+  })
+  await session($, on)
+  const ui = await $.ui.mount({ plugin: 'savvy-progress', surface: 'desktop', ...BAND })
+  const gap = await ui.find({ key: 'savvy-below' })
+  expect(gap?.props.marginTop).toBe('sm')
+  // A column, so the band beneath stretches to the full width instead of shrinking to its content.
+  expect(gap?.props.flexDirection).toBe('column')
+  expect(await ui.find({ text: 'Other mod' })).toBeDefined()
 })

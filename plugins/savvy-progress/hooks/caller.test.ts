@@ -14,7 +14,7 @@ test('caller: a subagent cannot report the flow', async $ => {
 
   // Nothing moved: the band still draws the same flow.
   const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: band })
-  const row = String((await ui.find({ type: 'Svg' }))?.props.source)
+  const row = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
   expect(row).toContain('Ship the thing')
   expect(row).toContain('Tasks 1/3')
   expect(row).not.toContain('Hijacked')

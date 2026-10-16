@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, Flow, MainWork, Panel, Phase, PlannedTask } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,6 +11,8 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const barStyleAtom = atom({ plugin: 'savvy-progress', key: 'barStyle' } as const, '')
+const main = atom({ plugin: 'savvy-progress', key: 'main' } as const, { isWorking: false, startedAt: 0, toolCalls: 0 } as MainWork)
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -20,6 +22,10 @@ const STEP_TOOL = 'mcp__savvy-progress__step'
 const STEP_BRIEF = `
 
 Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar.`
+// Any other subagent may run without the tool (a type with its own tool list), so its brief is conditional.
+const ANY_BRIEF = `
+
+Progress reporting, if the \`${STEP_TOOL}\` tool is available to you: before other work, call it with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar; skip this if the tool is not there.`
 const PANE = 'savvy-agents'
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
 const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light']
@@ -75,6 +81,12 @@ const STRINGS = {
     review: 'Review',
     busy: 'running',
     ctx: 'ctx',
+    left: '~{t} left',
+    working: 'Working',
+    toolCalls: 'tool calls',
+    ready: 'Ready',
+    lastTurn: 'last turn',
+    work: { explore: 'explore', review: 'review', build: 'build', test: 'test', research: 'research', write: 'write', plan: 'plan', secure: 'security' },
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -106,6 +118,12 @@ const STRINGS = {
     review: 'Ревью',
     busy: 'в работе',
     ctx: 'ctx',
+    left: 'осталось ~{t}',
+    working: 'Работаю',
+    toolCalls: 'вызовов',
+    ready: 'Готов',
+    lastTurn: 'прошлый ход',
+    work: { explore: 'поиск', review: 'ревью', build: 'разработка', test: 'тесты', research: 'исследование', write: 'текст', plan: 'план', secure: 'безопасность' },
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -137,6 +155,12 @@ const STRINGS = {
     review: 'בדיקה',
     busy: 'בעבודה',
     ctx: 'הקשר',
+    left: 'נותרו ~{t}',
+    working: 'עובד',
+    toolCalls: 'קריאות כלים',
+    ready: 'מוכן',
+    lastTurn: 'תור קודם',
+    work: { explore: 'חיפוש', review: 'סקירה', build: 'בנייה', test: 'בדיקות', research: 'מחקר', write: 'כתיבה', plan: 'תכנון', secure: 'אבטחה' },
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
   },
@@ -225,7 +249,8 @@ const label = (f: Flow): string => {
   return `${f.phase === 'review' ? s.review : s.tasks} ${count}`
 }
 
-const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? f.done / f.total : 0)
+// Accepted tasks, plus the share of their steps the running workers have reported.
+const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? Math.min(1, (f.done + (f.partial ?? 0)) / f.total) : 0)
 
 // Deterministic noise so the dither does not shimmer between redraws.
 const noise = (x: number, y: number): number => {
@@ -233,12 +258,14 @@ const noise = (x: number, y: number): number => {
   return s - Math.floor(s)
 }
 
-// The whole row is one SVG: the desktop wraps sibling elements onto new lines,
-// so title, bar, percent and the crab live in one drawing; only the count and
-// the dismiss are Buttons beside it.
-const H = 22
+// Another mod's band beneath this one gets a small gap above it, so the two read as separate rows. The gap's box
+// is a column so that band still stretches to the full width (a row would shrink it to its content).
+// The band is a flex row of small drawings (title, track, stats, crab) and Buttons, each
+// as wide as its content (the track as wide as the row allows), spread edge to edge so the
+// gaps between them grow and shrink with the window. Every drawing is H tall with its
+// content centred, so they all share one centre line.
+const H = 24
 const BAR_H = 16
-const CRAB_W = 26
 // The crab's drawing grid is 30 units wide, props included.
 const CRAB_BOX = 30
 const CELL = 3
@@ -271,80 +298,429 @@ const fitText = (s: string, size: number, maxW: number): string => {
   return out + '…'
 }
 
-const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
-  // The title takes what it needs, up to 40% of the row; the bar takes the rest.
-  const title = fitText(f.title, 13, Math.max(60, W * 0.4))
-  const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
-  const BAR_W = Math.max(60, W - BAR_X - 46 - CRAB_W)
+const SVG_STYLE = `<style>.t{fill:#1f1f1f}.m{fill:#8a8a8a}@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}}
+.live{animation:p 1.6s ease-in-out infinite}@keyframes p{50%{opacity:.3}}@media (prefers-reduced-motion: reduce){.live{animation:none}}</style>`
+
+// A dot and a bold word or title, as wide as the words: the band's left end.
+const headSvg = (title: string, color: string, isLive: boolean, maxW = 600): { source: string; width: number } => {
+  const rtl = isRtl()
+  const text = fitText(title, 13, Math.max(40, maxW - 16))
+  const W = Math.ceil(16 + textWidth(text, 13) + 2)
+  const at = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
+  return {
+    width: W,
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${SVG_STYLE}
+<circle${isLive ? ' class="live"' : ''} cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
+<text class="t" ${at} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(text)}</text>
+</svg>`,
+  }
+}
+
+// Muted figures (percent and time left, tool calls). Their width is measured with every digit
+// read as a 0 and rounded up to 8px, so a ticking clock (a narrow 1 for an 8) never resizes the
+// drawing: a new width moved every other piece of the row and redrew the track from scratch each
+// second. `end` keeps the words against the drawing's far edge, so they grow away from the crab.
+const statSvg = (text: string, maxW = 600, align: 'start' | 'end' = 'start'): { source: string; width: number } => {
+  const rtl = isRtl()
+  const shown = fitText(text, 12.5, maxW)
+  const W = Math.max(8, Math.ceil((textWidth(shown.replace(/\d/g, '0'), 12.5) + 2) / 8) * 8)
+  const atEnd = (align === 'end') !== rtl
+  const at = `x="${atEnd ? W : 0}"${rtl ? ' direction="rtl"' : ''} text-anchor="${atEnd === rtl ? 'start' : 'end'}"`
+  return {
+    width: W,
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${SVG_STYLE}
+<text class="m" ${at} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${xml(shown)}</text>
+</svg>`,
+  }
+}
+
+// The flow's track, BAR_W wide: the dithered fill, the faint layer handed out, ticks, and the label pill.
+// The bar redraws every second for its clock, and a redrawn image starts its animations over, so
+// each drawing is given the time (`at`, ms): every loop's delay puts it where it would be by now,
+// and the motion runs on across redraws instead of replaying the same first second.
+const phase = (at: number, period: number, offset = 0): string => {
+  const into = (((at / 1000 + offset) % period) + period) % period
+  return `-${Math.round(into * 100) / 100}`
+}
+
+// The liquid fill. Left to right, inside the track's clip; `trackSvg` mirrors it for Hebrew.
+// Every loop is phased by the clock, as the pixels are, so it carries on across redraws.
+//   body:    the fill with a rippling front edge (a sine wave climbing the edge), deeper below
+//   ghost:   a fainter copy of the edge just ahead of it, out of step, for depth
+//   ripples: two light lines drifting through the liquid, one each way, at different speeds
+//   bubbles: a few rising and fading, each on its own beat; a finished bar's liquid lies still
+const WAVE_L = 8
+const WAVE_A = 1.8
+
+const liquid = (f: Flow, fillW: number, runW: number, color: string, at: number): { body: string; css: string } => {
+  const calm = f.isFinished
+  const edgeBeat = calm ? 3.6 : 1.2
+  const ghostBeat = calm ? 4.4 : 1.7
+  const r1Beat = calm ? 6 : 2.4
+  const r2Beat = calm ? 8 : 3.4
+  const fmt = (n: number): string => String(Math.round(n * 100) / 100)
+
+  // The front edge from y = -L to BAR_H + L, so a one-wavelength climb never shows a gap.
+  const edge = (x0: number, amp: number): string => {
+    const points: string[] = []
+    for (let y = -WAVE_L; y <= BAR_H + WAVE_L; y += 0.5) points.push(`L${fmt(x0 + amp * Math.sin((2 * Math.PI * y) / WAVE_L))} ${y}`)
+    return `M-2 ${-WAVE_L} ${points.join(' ')} L-2 ${BAR_H + WAVE_L} Z`
+  }
+  // A light line across the fill, one wavelength wider on each side so its drift never shows an end.
+  const ripple = (y: number, len: number, amp: number): string => {
+    const points: string[] = []
+    for (let x = -len; x <= fillW + len; x += 2) points.push(`${x === -len ? 'M' : 'L'}${x} ${fmt(y + amp * Math.sin((2 * Math.PI * x) / len))}`)
+    return points.join(' ')
+  }
+
+  const bubbles: string[] = []
+  if (!calm) {
+    const count = Math.max(2, Math.min(8, Math.floor(fillW / 40)))
+    for (let i = 0; i < count; i++) {
+      const beat = Math.round((1.6 + noise(i, 3) * 1.6) * 10) / 10
+      const x = 4 + noise(i * 3 + 1, 7) * Math.max(1, fillW - 12)
+      const radius = 0.7 + noise(i, 11) * 0.6
+      bubbles.push(`<circle class="bub" style="animation-duration:${beat}s;animation-delay:${phase(at, beat, i * 0.37 + noise(i, 5) * beat)}s" cx="${fmt(x)}" cy="${BAR_H - 2}" r="${fmt(radius)}" fill="#fff"/>`)
+    }
+  }
+
+  const ahead = runW > fillW ? `<rect x="${fillW}" width="${runW - fillW}" height="${BAR_H}" fill="${color}" opacity="0.07"/>` : ''
+  const body =
+    fillW < 3
+      ? ahead
+      : `${ahead}
+<path class="ghost" style="animation-delay:${phase(at, ghostBeat, ghostBeat / 3)}s" d="${edge(fillW + 1.4, WAVE_A * 0.8)}" fill="${color}" opacity="0.2"/>
+<path class="edge" style="animation-delay:${phase(at, edgeBeat)}s" d="${edge(fillW, WAVE_A)}" fill="url(#lq)"/>
+<g clip-path="url(#fl)" fill="none" stroke="#fff" stroke-linecap="round">
+<path class="rip1" style="animation-delay:${phase(at, r1Beat)}s" d="${ripple(4.5, 14, 1)}" stroke-width="1" stroke-opacity="0.22"/>
+<path class="rip2" style="animation-delay:${phase(at, r2Beat)}s" d="${ripple(11, 10, 0.8)}" stroke-width="0.9" stroke-opacity="0.14"/>
+</g>
+<g clip-path="url(#fl)" opacity="0.7">${bubbles.join('')}</g>`
+
+  const css = `.edge{animation:edge ${edgeBeat}s linear infinite}.ghost{animation:edge ${ghostBeat}s linear infinite reverse}
+@keyframes edge{to{transform:translateY(-${WAVE_L}px)}}
+.rip1{animation:rip1 ${r1Beat}s linear infinite}@keyframes rip1{to{transform:translateX(-14px)}}
+.rip2{animation:rip2 ${r2Beat}s linear infinite}@keyframes rip2{from{transform:translateX(-10px)}to{transform:translateX(0)}}
+.bub{animation:rise 2s ease-in infinite}
+@keyframes rise{0%{transform:translateY(0);opacity:0}20%{opacity:.85}100%{transform:translateY(-11px);opacity:0}}
+@media (prefers-reduced-motion: reduce){.edge,.ghost,.rip1,.rip2,.bub{animation:none}.bub{opacity:0}}`
+  return { body, css }
+}
+
+// The crab trail. Left to right; `trackSvg` mirrors it for Hebrew. A crab walks the track and
+// stands where the work has got to; behind it, a pale wash and alternating footprints, fainter
+// where it set out, with a glint that travels along them toward the crab. A finished trail ends
+// with the crab resting. Like the other styles, every loop is phased by the clock.
+const TRAIL_CRAB = 0.5
+const TRAIL_STEP = 6
+
+const trail = (f: Flow, fillW: number, runW: number, color: string, at: number, BAR_W: number, pillW: number): { body: string; css: string; pillX: number } => {
+  const calm = f.isFinished
+  const crabW = CRAB_BOX * TRAIL_CRAB
+  const crabX = Math.round(Math.max(0, Math.min(BAR_W - crabW, fillW - crabW / 2)) * 10) / 10
+  // The body (rows 10-26 of the crab's grid) centred on the track's middle.
+  const crabY = Math.round((BAR_H / 2 - BODY_MID * TRAIL_CRAB) * 100) / 100
+  const glint = calm ? 4 : 2.4
+  const prints: string[] = []
+  const count = Math.max(0, Math.floor((crabX - 4) / TRAIL_STEP))
+  for (let i = 0; i < count; i++) {
+    const x = 3 + i * TRAIL_STEP
+    const up = i % 2 === 0
+    const strength = Math.round((0.3 + 0.6 * (count > 1 ? i / (count - 1) : 1)) * 100) / 100
+    prints.push(
+      `<g class="print" style="animation-delay:${phase(at, glint, -i * 0.11)}s"><g opacity="${strength}">` +
+        `<rect x="${x}" y="${up ? 4 : 9.5}" width="2.2" height="2.2" rx="1.1"/><rect x="${x + 2.6}" y="${up ? 5.2 : 10.7}" width="1.5" height="1.5" rx="0.75"/></g></g>`,
+    )
+  }
+  const ahead = runW > fillW ? `<rect x="${fillW}" width="${runW - fillW}" height="${BAR_H}" fill="${color}" opacity="0.08"/>` : ''
+  const body = `${ahead}<rect width="${Math.max(0, fillW)}" height="${BAR_H}" fill="${color}" opacity="0.16"/>
+<g fill="${color}">${prints.join('')}</g>
+${CRAB_CSS}${crab(crabX, crabY, calm ? 'rest' : 'other', false, !calm, TRAIL_CRAB)}`
+  // The label rides just behind the crab, or just ahead of it while there is no room behind.
+  const pillX = crabX >= pillW + 4 ? crabX - pillW - 2 : Math.min(BAR_W - pillW, crabX + crabW + 2)
+  const css = `.print{animation:print ${glint}s ease-in-out infinite}@keyframes print{0%,100%{opacity:1}40%{opacity:.35}}
+@media (prefers-reduced-motion: reduce){.print{animation:none}}`
+  return { body, css, pillX }
+}
+
+// Aurora. Left to right; `trackSvg` mirrors it for Hebrew. Over a dim wash of the fill, soft
+// blurred lights in four hues drift through it, each at its own pace; a seam of light pulses at
+// its edge while work goes on. Phased by the clock, like the others.
+const AURORA_HUES = ['', '#4fd1c5', '#e879c9', '#7aa7ff']
+
+const aurora = (f: Flow, fillW: number, runW: number, color: string, at: number): { body: string; css: string } => {
+  const calm = f.isFinished
+  const fmt = (n: number): string => String(Math.round(n * 100) / 100)
+  const travel = fillW + 140
+  const lights: string[] = []
+  for (let i = 0; i < 4; i++) {
+    // Five to nine seconds a pass (half again once finished), each light its own.
+    const beat = Math.round(((calm ? 8 : 5) + noise(i, 13) * 4) * 10) / 10
+    const hue = AURORA_HUES[i] || color
+    const cy = 3 + noise(i, 17) * 10
+    lights.push(`<ellipse class="aur" style="animation-duration:${beat}s;animation-delay:${phase(at, beat, (i * beat) / 4)}s" cx="-70" cy="${fmt(cy)}" rx="${fmt(26 + noise(i, 19) * 14)}" ry="${fmt(7 + noise(i, 23) * 4)}" fill="${hue}" opacity="${calm ? 0.55 : 0.8}"/>`)
+  }
+  const ahead = runW > fillW ? `<rect x="${fillW}" width="${runW - fillW}" height="${BAR_H}" fill="${color}" opacity="0.06"/>` : ''
+  const seam = !calm && fillW > 4 ? `<rect class="seam" style="animation-delay:${phase(at, 1.6)}s" x="${fillW - 1.5}" width="2" height="${BAR_H}" fill="#fff"/>` : ''
+  const body = `${ahead}<rect width="${Math.max(0, fillW)}" height="${BAR_H}" fill="${color}" opacity="0.45"/>
+<g clip-path="url(#fl)"><g filter="url(#ab)">${lights.join('')}</g></g>
+${seam}`
+  const css = `.aur{animation:aur 6s linear infinite}@keyframes aur{to{transform:translateX(${travel}px)}}
+.seam{animation:seam 1.6s ease-in-out infinite}@keyframes seam{0%,100%{opacity:.3}50%{opacity:.85}}
+@media (prefers-reduced-motion: reduce){.aur,.seam{animation:none}}`
+  return { body, css }
+}
+
+// Circuit. Left to right; `trackSvg` mirrors it for Hebrew. A trace steps between two lanes
+// along the track: dim ahead, lit up to the fill, a solder pad at each task boundary, and a
+// pulse of light running the lit part to a blinking pad at its head. Phased by the clock.
+const TRACE_SEG = 22
+const TRACE_LANES = [5, 11]
+
+const tracePoints = (BAR_W: number): [number, number][] => {
+  const points: [number, number][] = [[2, TRACE_LANES[0] ?? 5]]
+  let lane = 0
+  for (let x = 2 + TRACE_SEG; x < BAR_W - 2; x += TRACE_SEG) {
+    const y = TRACE_LANES[lane] ?? 5
+    const next = TRACE_LANES[1 - lane] ?? 11
+    points.push([x - 3, y], [x, next])
+    lane = 1 - lane
+  }
+  points.push([BAR_W - 2, TRACE_LANES[lane] ?? 5])
+  return points
+}
+
+// The trace up to `upTo`, and its length.
+const traceTo = (points: [number, number][], upTo: number): { d: string; length: number; end: [number, number] } => {
+  const kept: [number, number][] = []
+  let length = 0
+  for (let i = 0; i < points.length; i++) {
+    const [x, y] = points[i] as [number, number]
+    if (i === 0) {
+      kept.push([x, y])
+      continue
+    }
+    const [px, py] = kept[kept.length - 1] as [number, number]
+    if (x <= upTo) {
+      kept.push([x, y])
+      length += Math.hypot(x - px, y - py)
+      continue
+    }
+    const t = x === px ? 0 : Math.max(0, Math.min(1, (upTo - px) / (x - px)))
+    const cut: [number, number] = [px + (x - px) * t, py + (y - py) * t]
+    kept.push(cut)
+    length += Math.hypot(cut[0] - px, cut[1] - py)
+    break
+  }
+  const fmt = (n: number): string => String(Math.round(n * 100) / 100)
+  const d = kept.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${fmt(x)} ${fmt(y)}`).join(' ')
+  return { d, length: Math.round(length * 100) / 100, end: kept[kept.length - 1] ?? [2, 5] }
+}
+
+const circuit = (f: Flow, fillW: number, color: string, at: number, BAR_W: number): { body: string; css: string } => {
+  const calm = f.isFinished
+  const points = tracePoints(BAR_W)
+  const all = traceTo(points, BAR_W)
+  const lit = traceTo(points, calm ? BAR_W : fillW)
+  const PULSE = 10
+  const pulseBeat = Math.max(1, Math.round((lit.length / (calm ? 60 : 140)) * 10) / 10)
+  const pads: string[] = []
+  for (let i = 1; i < f.total; i++) {
+    const x = (BAR_W * i) / f.total
+    const y = traceTo(points, x).end[1]
+    const isLit = calm || x <= fillW
+    // A pad still ahead is an empty ring in the dim trace's grey, which reads on either theme.
+    pads.push(`<circle class="pad" cx="${Math.round(x * 100) / 100}" cy="${Math.round(y * 100) / 100}" r="1.9" ${isLit ? `fill="${color}"` : 'fill="none" stroke="#808080" stroke-opacity="0.7" stroke-width="1"'}/>`)
+  }
+  const [hx, hy] = lit.end
+  const head = !calm && fillW > 3 ? `<circle class="head-pad" style="animation-delay:${phase(at, 1.2)}s" cx="${Math.round(hx * 100) / 100}" cy="${Math.round(hy * 100) / 100}" r="2.6" fill="${color}"/>` : ''
+  const showLit = lit.length > 0.5
+  const body = `<path class="trace-dim" d="${all.d}" fill="none" stroke-width="1.2" stroke-linejoin="round"/>
+${showLit ? `<path d="${lit.d}" fill="none" stroke="${color}" stroke-width="4" stroke-linejoin="round" opacity="0.28"/>
+<path class="trace-lit" d="${lit.d}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+<path class="pulse" style="animation-delay:${phase(at, pulseBeat)}s" d="${lit.d}" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="${PULSE} ${lit.length}"/>` : ''}
+${pads.join('')}
+${head}`
+  const css = `.trace-dim{stroke:#b4b4b0}@media (prefers-color-scheme: dark){.trace-dim{stroke:#4a4a4a}}
+.pulse{animation:pulse ${pulseBeat}s linear infinite}@keyframes pulse{from{stroke-dashoffset:${PULSE}}to{stroke-dashoffset:-${lit.length}}}
+.head-pad{animation:blink 1.2s ease-in-out infinite}@keyframes blink{50%{opacity:.35}}
+@media (prefers-reduced-motion: reduce){.pulse,.head-pad{animation:none}.pulse{opacity:0}}`
+  return { body, css }
+}
+
+const trackSvg = (f: Flow, BAR_W: number, at = 0, style: 'liquid' | 'pixels' | 'crab' | 'aurora' | 'circuit' = 'liquid'): string => {
+  const beats = f.isFinished ? [3.2, 3.8, 4.4, 3.5] : [2.2, 2.8, 1.9, 3.3]
   const color = f.isFinished ? DONE : ACCENT
   const y0 = (H - BAR_H) / 2
   const fillW = Math.round(BAR_W * ratio(f))
   const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running)) / f.total) : 0
   const dots: string[] = []
-  // Positions are worked out left to right; right to left mirrors each box
-  // inside the bar (`bx`) and across the row (`rx`). Text is never mirrored.
+  // Positions are worked out left to right; right to left mirrors each box inside the bar.
   const rtl = isRtl()
   const bx = (x: number, w: number): number => (rtl ? BAR_W - x - w : x)
-  const rx = (x: number, w: number): number => (rtl ? W - x - w : x)
 
   // Dithered fill: sparse at the start, dense toward the head.
-  const cols = Math.floor(fillW / CELL)
+  const isLiquid = style === 'liquid'
+  const isCrab = style === 'crab'
+  const isAurora = style === 'aurora'
+  const isCircuit = style === 'circuit'
+  const isScene = isLiquid || isCrab || isAurora || isCircuit
+  const cols = isScene ? 0 : Math.floor(fillW / CELL)
   const rows = Math.floor(BAR_H / CELL)
   for (let c = 0; c < cols; c++) {
     const density = 0.35 + 0.6 * Math.pow(c / Math.max(1, cols), 1.2)
     for (let r = 0; r < rows; r++) {
-      if (noise(c, r) < density) dots.push(`<rect class="t${Math.floor(noise(r, c) * 4)}" x="${bx(c * CELL + 1, 2)}" y="${r * CELL + 1}" width="2" height="2"/>`)
+      // Each pixel keeps its own place in its group's beat, so the fill shimmers rather than blinking in four sets.
+      const k = Math.floor(noise(r, c) * 4)
+      const beat = beats[k] ?? 2.2
+      if (noise(c, r) < density) dots.push(`<rect class="t${k}" style="animation-delay:${phase(at, beat, noise(r * 7 + 3, c * 3 + 1) * beat)}s" x="${bx(c * CELL + 1, 2)}" y="${r * CELL + 1}" width="2" height="2"/>`)
     }
   }
   // Handed to workers, not yet accepted: a faint second layer.
   const faint: string[] = []
-  for (let c = cols; c < Math.floor(runW / CELL); c++) {
+  for (let c = cols; !isScene && c < Math.floor(runW / CELL); c++) {
     for (let r = 0; r < rows; r++) {
-      if (noise(c + 7, r + 3) < 0.2) faint.push(`<rect class="t${Math.floor(noise(r + 5, c) * 4)}" x="${bx(c * CELL + 1, 1.7)}" y="${r * CELL + 1}" width="1.7" height="1.7"/>`)
+      const k = Math.floor(noise(r + 5, c) * 4)
+      const beat = beats[k] ?? 2.2
+      if (noise(c + 7, r + 3) < 0.2) faint.push(`<rect class="t${k}" style="animation-delay:${phase(at, beat, noise(c * 5 + 2, r * 11 + 7) * beat)}s" x="${bx(c * CELL + 1, 1.7)}" y="${r * CELL + 1}" width="1.7" height="1.7"/>`)
     }
   }
 
   const ticks: string[] = []
-  for (let i = 1; i < f.total; i++) {
+  for (let i = 1; !isCircuit && i < f.total; i++) {
     const x = Math.round((BAR_W * i) / f.total)
     if (x > fillW + 4) ticks.push(`<rect x="${bx(x, 1.5)}" y="${BAR_H / 2 - 4}" width="1.5" height="8" rx="0.75"/>`)
   }
 
   const text = label(f)
   const pillW = Math.round(18 + text.length * 6.6)
-  const pillX = bx(Math.max(0, Math.min(BAR_W - pillW, fillW - pillW)), pillW)
-  const percent = `${Math.round(ratio(f) * 100)}%`
-  // `direction="rtl"` puts Hebrew words and numbers in reading order; `start` is then the right edge.
-  const titleAt = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
-  const percentAt = rtl ? `x="${CRAB_W + 6}" y="${H / 2 + 4.5}"` : `x="${W - CRAB_W - 6}" y="${H / 2 + 4.5}" text-anchor="end"`
-  const crabW = CRAB_BOX * 0.8
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  const walk = isCrab ? trail(f, fillW, runW, color, at, BAR_W, pillW) : null
+  // The label rides the fill's head; a fill too short to hold it gets the label just ahead of it
+  // instead, so the label never covers the progress it labels.
+  const headPill = fillW >= pillW + 2 ? fillW - pillW : Math.min(BAR_W - pillW, fillW + 4)
+  const pillX = bx(walk ? walk.pillX : headPill, pillW)
+  // A soft band of light sweeps along the fill toward its head (slower once finished), every
+  // pass the same length of time whatever the fill's width.
+  const SHEEN_W = 36
+  const sweep = fillW + SHEEN_W
+  const sheenBeat = f.isFinished ? 4.8 : 2.4
+  const flow = isLiquid
+    ? liquid(f, fillW, runW, color, at)
+    : isAurora
+      ? aurora(f, fillW, runW, color, at)
+      : isCircuit
+        ? circuit(f, fillW, color, at, BAR_W)
+        : (walk ?? { body: '', css: '' })
+  // Right to left, a scene is mirrored whole: it then leads toward the left.
+  const flowed = isScene ? `<g${rtl ? ` transform="translate(${BAR_W},0) scale(-1,1)"` : ''}>${flow.body}</g>` : ''
+  const sheen =
+    fillW > 8 && (style === 'pixels' || isLiquid)
+      ? `<g clip-path="url(#fl)"><rect class="sheen" style="animation-delay:${phase(at, sheenBeat)}s" x="${rtl ? BAR_W : -SHEEN_W}" width="${SHEEN_W}" height="${BAR_H}" fill="url(#sh)"/></g>`
+      : ''
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${BAR_W}" height="${H}" viewBox="0 0 ${BAR_W} ${H}">
 <style>
-.t{fill:#1f1f1f}.m{fill:#8a8a8a}.k{fill:#e4e4e2}.tk{fill:#b4b4b0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}.k{fill:#2c2c2c}.tk{fill:#5a5a5a}}
+.k{fill:#e4e4e2}.tk{fill:#b4b4b0}
+@media (prefers-color-scheme: dark){.k{fill:#2c2c2c}.tk{fill:#5a5a5a}}
 /* Pixels twinkle in four out-of-phase groups; a finished bar settles to a slow glow. */
-.t0,.t1,.t2,.t3{animation:tw ${f.isFinished ? 3.2 : 2.2}s ease-in-out infinite}
-.t1{animation-duration:${f.isFinished ? 3.8 : 2.8}s;animation-delay:-.7s}.t2{animation-duration:${f.isFinished ? 4.4 : 1.9}s;animation-delay:-1.3s}.t3{animation-duration:${f.isFinished ? 3.5 : 3.3}s;animation-delay:-.4s}
+.t0,.t1,.t2,.t3{animation:tw ${beats[0]}s ease-in-out infinite}
+.t1{animation-duration:${beats[1]}s}.t2{animation-duration:${beats[2]}s}.t3{animation-duration:${beats[3]}s}
 @keyframes tw{0%,100%{opacity:1}50%{opacity:${f.isFinished ? 0.8 : 0.3}}}
-@media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
+.sheen{animation:sheen ${sheenBeat}s cubic-bezier(.45,0,.55,1) infinite}
+@keyframes sheen{from{transform:translateX(0)}to{transform:translateX(${rtl ? -sweep : sweep}px)}}
+@media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3,.sheen{animation:none}.sheen{opacity:0}}
+${flow.css}
 </style>
-<defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
-<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
-<g transform="translate(${rx(BAR_X, BAR_W)},${y0})">
+<defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath>
+<clipPath id="fl"><rect x="${bx(0, fillW)}" y="0" width="${fillW}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath>
+<linearGradient id="sh" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".28"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<filter id="ab" x="-50%" y="-100%" width="200%" height="300%"><feGaussianBlur stdDeviation="5"/></filter>
+<linearGradient id="lq" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity="0.82"/><stop offset=".55" stop-color="${color}"/><stop offset="1" stop-color="${color}" stop-opacity="0.95"/></linearGradient></defs>
+<g transform="translate(0,${y0})">
 <rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
 <g clip-path="url(#c)">
+${flowed}
 <g fill="${color}">${dots.join('')}</g>
 <g fill="${color}" opacity="0.45">${faint.join('')}</g>
 <g class="tk">${ticks.join('')}</g>
 </g>
+${sheen}
 <rect x="${pillX}" width="${pillW}" height="${BAR_H}" rx="${BAR_H / 2}" fill="${color}"/>
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle"${rtl ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
-<text class="m" ${percentAt} font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, rtl)}
 </svg>`
+}
+
+// Of the room left after the fixed pieces, the track takes this share; the rest becomes the gaps.
+const TRACK_SHARE = 0.72
+
+// The main session's work, read off each tool call: what the crab dresses for while it works.
+const TEST_COMMAND = /\b(test|tests|pytest|jest|vitest|mocha|spec)\b|npm (run )?test|go test|cargo test|bun test/
+const LOOK_COMMAND = /^\s*(ls|dir|cat|type|head|tail|grep|rg|find|git (log|diff|status|show|blame)|wc|tree|Get-ChildItem|Get-Content|Select-String)\b/i
+const DOC_FILE = /\.(md|mdx|txt|rst|docx?)$/i
+
+const toolWork = (tool: string, input: Record<string, unknown>): string => {
+  const name = toolName(tool)
+  if (/secur|vuln/i.test(tool)) return 'secure'
+  if (/^(WebFetch|WebSearch)$/.test(name) || /navigate|page_text|read_page/i.test(name)) return 'research'
+  if (/^(Read|Grep|Glob|LS|ToolSearch|NotebookRead)$/.test(name) || /list|search_|read_|get_|find/i.test(name)) return 'explore'
+  if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name)) return DOC_FILE.test(String(input.file_path ?? '')) ? 'write' : 'build'
+  if (/^(Bash|PowerShell)$/.test(name)) {
+    const command = String(input.command ?? '')
+    if (TEST_COMMAND.test(command)) return 'test'
+    if (LOOK_COMMAND.test(command)) return 'explore'
+    return 'build'
+  }
+  if (/^(Agent|Workflow|TodoWrite|EnterPlanMode|ExitPlanMode|Skill|AskUserQuestion)$/.test(name) || /plan/i.test(name)) return 'plan'
+  if (/review/i.test(name)) return 'review'
+  return 'build'
+}
+
+// `mcp__server__tool` reads as `tool`.
+const toolName = (tool: string): string => tool.split('__').pop() || tool
+
+// Live while the turn runs; between turns, the last turn's totals, or nothing before the first.
+const mainLine = (m: MainWork, at: number): string => {
+  const s = tr()
+  if (!m.isWorking) return m.endedAt === undefined ? '' : `${s.lastTurn}: ${m.toolCalls} ${s.toolCalls} · ${fmtTime(Math.max(0, m.endedAt - m.startedAt))}`
+  const parts = [`${m.toolCalls} ${s.toolCalls}`, fmtTime(Math.max(0, at - m.startedAt))]
+  if (m.lastTool) parts.push(toolName(m.lastTool))
+  return parts.join(' · ')
+}
+
+const mainHead = (m: MainWork): string => (m.isWorking ? tr().working : tr().ready)
+
+// The crab fills the row's height like the label pill and a line of text beside it: 28 grid units at 0.8 is 22px in a 24px row.
+const BAND_CRAB = 0.8
+const bandCrabW = Math.ceil(CRAB_BOX * BAND_CRAB) + 2
+
+// The bar's crab: the newest running subagent's work (the main session's when that reads as nothing),
+// else the flow's phase, else what the main session is doing, else resting.
+const barCostume = (f: Flow, list: AgentRun[], m: MainWork): string => {
+  // Newest by start, later in the list on a tie: the list is in spawn order.
+  const newest = list.filter(a => a.status === 'running').reduce<AgentRun | undefined>((n, a) => (!n || a.startedAt >= n.startedAt ? a : n), undefined)
+  if (newest) {
+    const work = costumeOf(newest.type, newest.description)
+    return work === 'other' && m.isWorking ? mainCostume(m) : work
+  }
+  if (f.isFinished) return 'rest'
+  if (f.phase === 'plan' || f.phase === 'design') return 'plan'
+  if (f.phase === 'review') return 'review'
+  return mainCostume(m)
+}
+
+// The crab dresses for the work while the turn runs (thinking before the first tool), and rests between turns.
+const mainCostume = (m: MainWork): string => (m.isWorking ? (m.work ?? 'plan') : 'rest')
+
+// The crab's grid is 28 units tall, but its body and legs fill rows 10-26 (hats and props sit
+// above): centring the grid drew the body low. Its own drawing centres the body, a little taller
+// than the row so a hat's top still fits; the row centres the drawing, so the body sits on the
+// same line as the text.
+const BODY_MID = 17.5
+const CRAB_H = 28
+
+const crabSvg = (costume: string, isBusy: boolean): string => {
+  const y = Math.round((CRAB_H / 2 - BODY_MID * BAND_CRAB) * 100) / 100
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${bandCrabW}" height="${CRAB_H}" viewBox="0 0 ${bandCrabW} ${CRAB_H}">${CRAB_CSS}${crab(1, y, costume, false, isBusy && costume !== 'rest', BAND_CRAB, isRtl())}</svg>`
 }
 
 const barText = (f: Flow, width: number): string => {
@@ -365,7 +741,7 @@ const TIER_COLOR: Record<string, string> = {
 }
 
 // What each savvy tier runs on, for planned tasks that have no run yet.
-const colorOf = (tier: string): string => TIER_COLOR[tier] ?? '#888780'
+const colorOf = (tier: string): string => TIER_COLOR[tier] ?? WORK_COLOR[tier] ?? '#888780'
 
 const TIER_MODEL: Record<string, [model: string, effort: string]> = {
   fable: ['Fable', 'high'],
@@ -469,6 +845,73 @@ const fmtTime = (ms: number): string => {
 
 const elapsed = (a: AgentRun, at: number): number => (a.endedAt ?? Math.max(at, a.startedAt)) - a.startedAt
 
+// Time left, extrapolated from the pace so far: elapsed / done x remaining.
+// Null until there is a pace to go on (one step or task done) or nothing is left.
+const remaining = (spent: number, done: number, total: number): number | null =>
+  done > 0 && total > done && spent > 0 ? (spent / done) * (total - done) : null
+
+// Counting down from the last report: at the pace so far, the steps left needed `est` then;
+// the time since comes off it, but never below what the steps after the current one need, so a
+// slow step holds the figure instead of letting it run out. Null once it has.
+const countdown = (start: number, reportAt: number, done: number, total: number, at: number): number | null => {
+  if (done <= 0 || total <= done || reportAt <= start) return null
+  const pace = (reportAt - start) / done
+  const left = Math.max(pace * (total - done) - Math.max(0, at - reportAt), pace * (total - done - 1))
+  return left > 0 ? left : null
+}
+
+const agentLeft = (a: AgentRun, at: number): number | null => {
+  if (a.status !== 'running' || !a.stepTotal) return null
+  return a.stepAt === undefined
+    ? remaining(elapsed(a, at), a.stepDone ?? 0, a.stepTotal)
+    : countdown(a.startedAt, a.stepAt, a.stepDone ?? 0, a.stepTotal, at)
+}
+
+// The flow's pace once a task is accepted; before that, the slowest running worker's own estimate.
+const flowLeft = (f: Flow, list: AgentRun[], at: number): number | null => {
+  if (f.isFinished || !f.total || f.done >= f.total) return null
+  // Parallel runs are not a pace: an automatic bar waits for the slowest worker.
+  if (f.done > 0 && f.startedAt && !f.isAuto) {
+    return f.progressAt === undefined ? remaining(Math.max(0, at - f.startedAt), f.done, f.total) : countdown(f.startedAt, f.progressAt, f.done, f.total, at)
+  }
+  const workers = list.map(a => agentLeft(a, at)).filter((ms): ms is number => ms !== null)
+  return workers.length ? Math.max(...workers) : null
+}
+
+// With no flow reported, the bar follows the subagents running now: the batch is
+// every run since the earliest of them started, finished ones counted done.
+const autoFlow = (list: AgentRun[]): Flow | null => {
+  const running = list.filter(a => a.status === 'running')
+  if (!running.length) return null
+  const start = Math.min(...running.map(a => a.startedAt))
+  const batch = list.filter(a => (a.endedAt ?? Infinity) >= start)
+  return {
+    ...blank(),
+    title: tr().pane,
+    total: batch.length,
+    done: batch.length - running.length,
+    running: running.length,
+    phase: 'delegate',
+    startedAt: start,
+    isAuto: true,
+  }
+}
+
+// The running workers' reported steps, in tasks: each counts its share of one task. An automatic
+// bar counts every running subagent; a reported flow, the workers on its planned tasks (all of
+// them when it planned none). Never more than the tasks still open.
+const withPartial = (f: Flow, list: AgentRun[]): Flow => {
+  if (f.isFinished || !f.total) return f
+  const planned = new Set((f.tasks ?? []).map(t => norm(t.title)))
+  const counts = (a: AgentRun) => f.isAuto || planned.size === 0 || planned.has(norm(a.description))
+  const partial = list
+    .filter(a => a.status === 'running' && a.stepTotal && counts(a))
+    .reduce((sum, a) => sum + Math.min(1, (a.stepDone ?? 0) / (a.stepTotal ?? 1)), 0)
+  return { ...f, partial: Math.min(partial, Math.max(0, f.total - f.done)) }
+}
+
+const fmtLeft = (ms: number): string => tr().left.replace('{t}', fmtTime(ms))
+
 type Planned = PlannedTask & { n: number }
 
 const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
@@ -542,6 +985,8 @@ const CRAB_CSS = `<style>
 .run .bd{animation:bob .5s steps(1) infinite -.125s}
 .run g{transform-box:fill-box}
 @keyframes st{50%{transform:translateY(-1px)}}@keyframes bob{50%{transform:translateY(1px)}}
+/* Acting, not walking: the feet stay put and the body leans into the work at a calmer beat. */
+.act .la,.act .lb{animation:none!important}.run.act .bd{animation:bob 1s ease-in-out infinite}
 .c-fable.run{animation:float 1s ease-in-out infinite}
 .c-fable.run .la,.c-fable.run .lb,.c-fable.run .bd{animation:none}
 .c-fable.run .ant{animation:blink 1s steps(1) infinite}
@@ -560,7 +1005,21 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
-@media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
+.c-review.run .it{animation:scan 1s steps(1) infinite}.c-review.run .gl{animation:blink 1s steps(1) infinite -.5s}
+.c-build.run .it{transform-origin:100% 100%;animation:twist .5s ease-in-out infinite}
+.c-test.run .it{transform-origin:50% 100%;animation:shake .5s steps(2) infinite}.c-test.run .bub{animation:rise 1s steps(4) infinite}
+@keyframes shake{25%{transform:rotate(10deg)}75%{transform:rotate(-10deg)}}@keyframes rise{100%{transform:translateY(-3px);opacity:0}}
+.c-research.run .pg{animation:blink .5s steps(1) infinite}.c-research.run .tas{transform-origin:50% 0;animation:sway 1s ease-in-out infinite}
+@keyframes sway{50%{transform:rotate(15deg)}}
+.c-write.run .it{animation:scrib .5s steps(1) infinite}
+@keyframes scrib{25%{transform:translate(1px,0)}50%{transform:translate(1px,1px)}75%{transform:translate(0,1px)}}
+.c-plan.run .it{transform-origin:0 50%;animation:unroll 1s ease-in-out infinite}@keyframes unroll{50%{transform:scaleX(1.3)}}
+.c-secure.run .pl{transform-origin:50% 100%;animation:sway .5s ease-in-out infinite}.c-secure.run .it{animation:st 1s steps(1) infinite}
+.c-rest .bd{animation:breathe 4s ease-in-out infinite}
+.c-rest .steam{animation:steam 2s ease-in-out infinite}.c-rest .steam2{animation:steam 2s ease-in-out infinite -1s}
+.c-rest g{transform-box:fill-box}
+@keyframes breathe{50%{transform:translateY(.6px)}}@keyframes steam{0%{opacity:0;transform:translateY(1px)}40%{opacity:.9}100%{opacity:0;transform:translateY(-3px)}}
+@media (prefers-reduced-motion: reduce){.run,.run g,.c-rest .bd,.c-rest g{animation:none!important}}
 </style>`
 
 const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
@@ -607,12 +1066,106 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
   },
+  // Test: lab goggles; the test tube shakes and bubbles.
+  test: (f, t) => {
+    crabBody(f, -4, 'it')
+    stamp(f, 8, 11, ['kkkk......kkkk', 'k..kkkkkkkk..k', 'k..k......k..k', 'kkkk......kkkk'], { k: '#55514C' })
+    f(7, 12, 1, 1, '#55514C'); f(22, 12, 1, 1, '#55514C')
+    stamp(f, 24, 3, ['g.g', 'g.g', 'gtg', 'gtg', 'gtg', '.g.'], { g: '#C9CCD2', t }, 'it')
+    f(25, 1, 1, 1, t, 'bub')
+  },
+  // Research: mortarboard with a swinging tassel; the open book's page turns.
+  research: (f, t) => {
+    crabBody(f, -3, 'it')
+    // Navy, not black: a black board vanishes on a dark band.
+    f(5, 7, 20, 1, '#5C6390'); f(5, 8, 20, 1, '#3C4166'); f(9, 9, 12, 1, '#3C4166'); f(14, 6, 2, 1, '#F5C542')
+    f(6, 9, 1, 4, t, 'tas')
+    stamp(f, 22, 6, ['cccccc', 'cppppc', 'cplppc', 'cppppc', 'cccccc'], { c: t, p: '#F8F6F1', l: '#C9CCD2' }, 'it')
+    f(24, 8, 2, 1, '#8E929A', 'pg')
+  },
+  // Write: a beret; the quill scribbles.
+  write: (f, t) => {
+    crabBody(f, -4, 'it')
+    stamp(f, 7, 6, ['...bbbbbbbbb....', '.bbbbbbbbbbbbbb.', 'bbbbbbbbbbbbbbbb', '.dddddddddddddd.'], { b: '#8C2F39', d: '#6E2430' })
+    f(13, 5, 2, 1, '#8C2F39')
+    stamp(f, 23, 4, ['.....wt', '....wtw', '...wtw.', '..wtw..', '.ww....', 'k......'], { w: '#F8F6F1', t, k: INK }, 'it')
+  },
+  // Plan: architect's glasses; the blueprint unrolls.
+  plan: f => {
+    crabBody(f, -4, 'it')
+    stamp(f, 8, 11, ['kkkk......kkkk', 'k..kkkkkkkk..k', 'k..k......k..k', 'kkkk......kkkk'], { k: '#8E929A' })
+    f(21, 7, 1, 3, '#2A5592', 'it')
+    stamp(f, 22, 7, ['bbbbbbb', 'bwbwbwb', 'bbbbbbb'], { b: '#3B6FB6', w: '#DDE8F5' }, 'it')
+  },
+  // Secure: knight's helmet with a plume; the shield stands guard.
+  secure: (f, t) => {
+    crabBody(f)
+    stamp(f, 6, 3, ['.....gggggggg.....', '...gggggggggggg...', '..gggggggggggggg..', '.gggggggggggggggg.', '.gghhhhhhhhhhhhgg.', 'gggggggggggggggggg'], { g: '#A9ADB5', h: '#7D828B' })
+    f(14, 0, 2, 3, t, 'pl')
+    stamp(f, 22, 11, ['ssssss', 'stwtts', 'swwwts', 'stwtts', '.stts.', '..ss..'], { s: '#8E929A', t, w: '#F8F6F1' }, 'it')
+  },
+  // Rest: between turns, eyes half shut over a mug of coffee; the steam curls up.
+  rest: f => {
+    crabBody(f)
+    f(9, 12, 2, 1, CLAY); f(19, 12, 2, 1, CLAY)
+    stamp(f, 23, 11, ['wwww.', 'wccwh', 'wwww.h', 'wwww.'], { w: '#F4F3EE', c: '#6B4226', h: '#F4F3EE' }, 'mug')
+    f(24, 6, 1, 3, '#C9CCD2', 'steam'); f(26, 5, 1, 3, '#C9CCD2', 'steam2')
+  },
   other: f => crabBody(f),
 }
+// Review and build wear the detective's and the engineer's kit.
+COSTUMES.review = COSTUMES.heavy as (f: Fill, t: string) => void
+COSTUMES.build = COSTUMES.careful as (f: Fill, t: string) => void
 
-const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
+// What a subagent is doing, read from its type and then its task description; the first match wins
+// (research before explore: "research" holds "search").
+const WORKS: readonly [work: string, pattern: RegExp][] = [
+  ['secure', /secur|vuln|threat|pentest|exploit|xss|csrf|injection|\bcve\b/],
+  ['review', /review|audit|verif|inspect|critique|\bcheck|validat|\blint/],
+  ['test', /\btest|debug|reproduc|benchmark|diagnos|bisect|\bqa\b/],
+  ['plan', /\bplan|design|architect|\bspec\b|outline|roadmap|strateg/],
+  ['research', /research|investigat|analy[sz]|compar|\bstudy|summar|evaluat|\bweb\b|\bread/],
+  ['explore', /explor|search|\bfind|locat|\bscan|\bmap\b|grep|look ?up|discover|\bcount|\blist\b|inventor/],
+  ['write', /\bwrit|draft|document|readme|translat|changelog|\bdocs?\b|\bcopy\b|blog|email/],
+  ['build', /implement|\bbuild|\bfix|\bcod(e|ing)|refactor|\badd|creat|updat|migrat|\bwire|\bport\b|patch|install|deploy|generat|\bmake|\bedit/],
+]
+
+const WORK_COLOR: Record<string, string> = {
+  explore: '#2E86AB',
+  review: '#8E5BB5',
+  build: '#D9A021',
+  test: '#2FA58A',
+  research: '#4F6BD8',
+  write: '#C2557A',
+  plan: '#3B7DC4',
+  secure: '#6B7A8F',
+}
+
+// Terminal rows have no drawings: one glyph per kind of work.
+const WORK_GLYPH: Record<string, string> = {
+  explore: '⌕', review: '◉', build: '⚒', test: '⚗', research: '❐', write: '✎', plan: '▦', secure: '⛨',
+}
+
+const workOf = (type: string, description = ''): string | null => {
+  const bare = type.replace(/^[^:]*:/, '')
+  if (bare === 'Explore') return 'explore'
+  if (bare === 'Plan') return 'plan'
+  // A named agent type says its work (a reviewer, a security scanner); savvy tiers and general-purpose say nothing.
+  const typed = WORKS.find(([, re]) => re.test(type.toLowerCase()))
+  if (typed && !bare.startsWith('savvy-') && bare !== 'general-purpose') return typed[0]
+  return WORKS.find(([, re]) => re.test(description.toLowerCase()))?.[0] ?? null
+}
+
+const workWord = (work: string): string => (tr().work as Record<string, string>)[work] ?? work
+
+// The crab dresses for the work; with no work to read, a savvy worker keeps its tier's costume.
+const costumeOf = (type: string, description = ''): string => workOf(type, description) ?? tierOf(type)
 
 const CRAB_SCALE = 1.1
+
+// Costumes whose motion is the walk itself: the plain crab, the racer, the floating astronaut.
+// Every other costume stands and works its prop.
+const WALKERS = new Set(['other', 'light', 'fable'])
 
 // Body and props nest inside `bd` so a prop rides the bob and adds its own motion;
 // legs stay outside it and step on their own. `mirror` flips the crab inside its
@@ -629,7 +1182,8 @@ const crab = (x: number, y: number, costume: string, dim = false, isWalking = fa
   const props = [...groups.keys()].filter(k => k !== 'bd' && k !== 'la' && k !== 'lb')
   const body = `<g class="bd">${(groups.get('bd') ?? []).join('')}${props.map(group).join('')}</g>`
   const place = mirror ? `translate(${x + CRAB_BOX * scale},${y}) scale(${-scale},${scale})` : `translate(${x},${y}) scale(${scale})`
-  return `<g transform="${place}" opacity="${dim ? 0.45 : 1}" shape-rendering="crispEdges"><g class="c-${costume}${isWalking ? ' run' : ''}">${body}${group('la')}${group('lb')}</g></g>`
+  const isActing = isWalking && !WALKERS.has(costume)
+  return `<g transform="${place}" opacity="${dim ? 0.45 : 1}" shape-rendering="crispEdges"><g class="c-${costume}${isWalking ? ' run' : ''}${isActing ? ' act' : ''}">${body}${group('la')}${group('lb')}</g></g>`
 }
 
 const statusMark = (x: number, y: number, status: string, color: string): string => {
@@ -700,24 +1254,35 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const ctx = ctxOf(a)
   const textW = W - 42 - 22
   const meta = [runModel(a)]
+  const work = workOf(a.type, a.description)
+  if (work) meta.push(workWord(work))
   if (a.round > 1) meta.push(`${s.round} ${a.round}`)
   if (a.status === 'failed') meta.push(s.failed)
   const barW = textW
   const progress = progressOf(a)
-  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+  const left = agentLeft(a, at)
+  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}${left === null ? '' : ` · ${fmtLeft(left)}`}`
   const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
-  // Without reported steps the bar falls back to the context, drawn grey.
-  const fillW = Math.round(barW * (progress ?? ctx / 100))
+  // Without reported steps there is no progress to draw: a running row gets a moving stripe that
+  // says it is working, a finished one an empty track. The context stays in the words beside it.
+  const fillW = Math.round(barW * (progress ?? 0))
+  const busyW = Math.max(24, Math.round(barW * 0.18))
+  const busy =
+    progress === null && a.status === 'running'
+      ? `<g clip-path="url(#bw${a.id.replace(/[^\w-]/g, '')})"><rect class="busy" x="${mx(W, 42 - busyW, busyW)}" y="55" width="${busyW}" height="4" rx="2" fill="${color}" opacity="0.7"/></g>
+<defs><clipPath id="bw${a.id.replace(/[^\w-]/g, '')}"><rect x="${mx(W, 42, barW)}" y="55" width="${barW}" height="4" rx="2"/></clipPath></defs>
+<style>.busy{animation:busy 1.6s cubic-bezier(.45,0,.55,1) infinite}@keyframes busy{to{transform:translateX(${isRtl() ? -(barW + busyW) : barW + busyW}px)}}@media (prefers-reduced-motion: reduce){.busy{animation:none;opacity:.35}}</style>`
+      : ''
   return svg(
     W,
     66,
-    `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
+    `${rowCrab(W, 0, 14, costumeOf(a.type, a.description), false, a.status === 'running')}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
 <text class="s" ${endText(W, 42 + barW, 49, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${stats}</text>
-<rect class="k" x="${mx(W, 42, barW)}" y="55" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, 42, fillW)}" y="55" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
+<rect class="k" x="${mx(W, 42, barW)}" y="55" width="${barW}" height="4" rx="2"/>${fillW > 0 ? `<rect x="${mx(W, 42, fillW)}" y="55" width="${fillW}" height="4" rx="2" fill="${color}"/>` : ''}${busy}
 ${statusMark(mx(W, W - 8), 16, a.status, color)}
 <line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
   )
@@ -732,7 +1297,7 @@ const plannedSvg = (W: number, p: Planned): string => {
   return svg(
     W,
     46,
-    `${rowCrab(W, 0, 6, tier, true)}
+    `${rowCrab(W, 0, 6, costumeOf(`savvy-${tier}`, p.title), true)}
 <text class="s" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tierWord(tier))}</tspan><tspan class="m">  ${xml(meta.filter(Boolean).join('  ·  '))}</tspan></text>
 ${statusMark(mx(W, W - 8), 16, 'planned', color)}
@@ -742,9 +1307,9 @@ ${statusMark(mx(W, W - 8), 16, 'planned', color)}
 
 const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>): string => {
   const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
-    ...planned.map(p => ({ k: p.tier in TIER_COLOR ? p.tier : 'other', c: colorOf(p.tier), s: 'planned', dim: true })),
+    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type, a.description), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
+    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type, a.description), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
+    ...planned.map(p => ({ k: costumeOf(`savvy-${p.tier}`, p.title), c: colorOf(p.tier), s: 'planned', dim: true })),
   ]
   const fit = Math.max(1, Math.floor((W - 150) / 36))
   const shown = icons.slice(0, fit)
@@ -771,6 +1336,39 @@ const ctxBar = (pct: number, width: number): string => {
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
 // Opens the agents pane, or closes it when it is up; true when it ends up open.
+// A run whose end never reached the mod (stopped, or ended while waiting on work of its own)
+// would stay "running" for good and count as an open task. Claude Code's own list says which
+// runs are alive: one it reports ended, or no longer lists, is closed at the last time it was
+// seen working, so it falls out of the current batch. A run just spawned may not be listed yet.
+const ENDED = new Set(['completed', 'failed', 'killed'])
+const LIST_GRACE_MS = 10_000
+
+async function reconcile($: EngineInterface, at: number): Promise<void> {
+  const live = await $.agent.list().catch(() => null)
+  if (live === null) return
+  const byId = new Map(live.map(info => [info.id, info]))
+  const isGone = (a: AgentRun): boolean => {
+    if (a.status !== 'running' || !a.agentId) return false
+    const info = byId.get(a.agentId)
+    return info ? ENDED.has(info.status) : at - a.startedAt > LIST_GRACE_MS
+  }
+  if (!(await read($, agents)).some(isGone)) return
+  await update($, agents, list =>
+    list.map((a): AgentRun => {
+      if (!isGone(a)) return a
+      const info = a.agentId ? byId.get(a.agentId) : undefined
+      return { ...a, status: info && info.status !== 'completed' ? 'failed' : 'done', endedAt: Math.min(at, a.seenAt ?? a.startedAt) }
+    }),
+  )
+}
+
+// The track's looks. /bar-style picks one and keeps it in the store, so it holds across
+// sessions and wins over the setting; with neither, the liquid.
+const BAR_STYLES = ['liquid', 'pixels', 'crab', 'aurora', 'circuit'] as const
+type BarStyle = (typeof BAR_STYLES)[number]
+const isBarStyle = (v: unknown): v is BarStyle => typeof v === 'string' && (BAR_STYLES as readonly string[]).includes(v)
+const BAR_STYLE_HELP = 'liquid (the default): a liquid with a rippling edge, drifting ripples and rising bubbles · pixels: a dithered fill of twinkling pixels · crab: a crab walks the track to where the work has got to, leaving footprints · aurora: soft lights drift through the fill · circuit: a lit circuit trace with a pulse running to its head'
+
 async function togglePane($: EngineInterface): Promise<boolean> {
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
   if (isOpen) {
@@ -845,20 +1443,50 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     await $.command.register({
+      name: 'bar-style',
+      description: 'Pick the progress bar look: pixels or liquid',
+    })
+    const storedStyle = await $.store.get('barStyle').catch(() => undefined)
+    if (isBarStyle(storedStyle)) await update($, barStyleAtom, () => storedStyle)
+    await $.command.register({
       name: 'agents-info',
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
     })
 
-    // Ticks the running agents' clocks; quiet when nothing runs.
+    // Ticks the running agents' clocks and the main session's; quiet when nothing runs.
     $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        const m = await read($, main)
+        if (!list.some(a => a.status === 'running') && !m.isWorking) return
         const at = await $.clock.now()
+        if (list.some(a => a.status === 'running')) await reconcile($, at)
         await update($, now, () => at)
       })()
     })
+    // autoOpen 'always': the panel opens with every session.
+    if (options.autoOpen === 'always') await autoOpen($, 'session')
     return started
+  })
+
+  // A follow-up message wakes a subagent for a new run, which never saw its spawn's brief:
+  // the brief rides along, so the new run reports its steps too (as the setting allows).
+  on('session.send', async ($, e, next) => {
+    if (e.text.includes(STEP_TOOL)) return next(e)
+    const row = (await read($, agents)).find(a => a.agentId !== undefined && a.agentId === e.to)
+    if (!row) return next(e)
+    const isSavvy = row.type.startsWith('savvy-')
+    const brief = isSavvy ? STEP_BRIEF : options.stepReports !== 'savvy' ? ANY_BRIEF : ''
+    return next(brief ? { ...e, text: e.text + brief } : e)
+  })
+
+  on('command.run', { command: 'bar-style' }, async ($, e) => {
+    const asked = (e.args ?? '').trim().toLowerCase()
+    const current = (await read($, barStyleAtom)) || (isBarStyle(options.barStyle) ? options.barStyle : 'liquid')
+    if (!isBarStyle(asked)) return { text: `Progress bar style: ${current}. Choose with /bar-style <style>: ${BAR_STYLE_HELP}.` }
+    await update($, barStyleAtom, () => asked)
+    await $.store.set('barStyle', asked).catch(() => undefined)
+    return { text: `Progress bar style set to ${asked}.` }
   })
 
   on('command.run', { command: 'agents-info' }, async ($, e) => {
@@ -883,7 +1511,12 @@ export const register: Register = (on, options) => {
       // A new flow starts with a clean list; agents still running stay.
       await update($, agents, list => list.filter(a => a.status === 'running'))
     }
-    const next = await update($, flow, p => merge(p, input))
+    const reportedAt = await $.clock.now().catch(() => undefined)
+    const next = await update($, flow, p => {
+      const merged = merge(p, input)
+      const moved = input.done !== undefined && merged.done !== (isNewFlow(p, input) ? 0 : (p?.done ?? 0))
+      return moved && reportedAt !== undefined ? { ...merged, progressAt: reportedAt } : merged
+    })
     if (next && input.tasks?.length) await autoOpen($, next.title)
     return { result: `ok: ${label(next ?? blank())}` }
   })
@@ -893,6 +1526,7 @@ export const register: Register = (on, options) => {
     const input = e as unknown as { done?: number; total?: number; note?: string }
     const agentId = e.agentId
     if (!agentId) return { result: 'ignored: only subagents report steps' }
+    const seen = await $.clock.now()
     let matched = false
     await update($, agents, list =>
       list.map(a => {
@@ -900,7 +1534,9 @@ export const register: Register = (on, options) => {
         matched = true
         const total = Math.max(0, Math.round(input.total ?? a.stepTotal ?? 0))
         const done = Math.max(0, Math.round(input.done ?? a.stepDone ?? 0))
-        return { ...a, stepTotal: total, stepDone: total ? Math.min(total, done) : done, stepNote: input.note?.trim() || undefined }
+        const stepDone = total ? Math.min(total, done) : done
+        const moved = stepDone !== (a.stepDone ?? 0) || total !== (a.stepTotal ?? 0)
+        return { ...a, stepTotal: total, stepDone, stepNote: input.note?.trim() || undefined, seenAt: seen, stepAt: moved ? seen : a.stepAt }
       }),
     )
     return { result: matched ? 'ok' : `ignored: no panel row for agent ${agentId}` }
@@ -923,8 +1559,9 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const isUnbriefed = e.subagentType.startsWith('savvy-') && !e.prompt.includes(STEP_TOOL)
-    const started = await next(isUnbriefed ? { ...e, prompt: e.prompt + STEP_BRIEF } : e)
+    const isSavvy = e.subagentType.startsWith('savvy-')
+    const brief = isSavvy ? STEP_BRIEF : options.stepReports !== 'savvy' ? ANY_BRIEF : ''
+    const started = await next(brief && !e.prompt.includes(STEP_TOOL) ? { ...e, prompt: e.prompt + brief } : e)
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
@@ -938,6 +1575,7 @@ export const register: Register = (on, options) => {
         model: started.model,
         status: 'running',
         startedAt: at,
+        seenAt: at,
         contextTokens: 0,
         contextMax: windowOf(started.model),
         tokens: 0,
@@ -948,10 +1586,12 @@ export const register: Register = (on, options) => {
       return [...list.filter(a => a.id !== run.id), run].slice(-200)
     })
     await update($, now, () => at)
+    // The flow's clock starts with its first worker: the time-left estimate counts from here.
+    await update($, flow, f => (f && !f.isFinished && f.startedAt === undefined ? { ...f, startedAt: at } : f))
     if (e.subagentType.startsWith('savvy-')) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
-    } else if (options.autoOpen === 'any') {
+    } else if (options.autoOpen !== 'savvy') {
       await autoOpen($, 'any-agent')
     }
     return started
@@ -965,6 +1605,7 @@ export const register: Register = (on, options) => {
     if (!agentId || !usage) return result
 
     const model = usage.model || e.model
+    const seen = await $.clock.now()
     await update($, agents, list =>
       list.map((a): AgentRun =>
         a.agentId !== agentId
@@ -975,6 +1616,7 @@ export const register: Register = (on, options) => {
               effort: typeof e.effort === 'string' ? e.effort : a.effort,
               status: 'running',
               endedAt: undefined,
+              seenAt: seen,
               contextTokens:
                 (usage.input_tokens || 0) +
                 (usage.cache_read_input_tokens || 0) +
@@ -995,7 +1637,47 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  // The main session's own turn: no agentId on the main loop. A subagent's turn that starts while
+  // its row stands finished is that agent woken again (a message sent to it): a new round, with
+  // the first run's steps cleared, counted as open work again.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId) {
+      const agentId = e.agentId
+      const list = await read($, agents)
+      if (list.some(a => a.agentId === agentId && a.status !== 'running')) {
+        const at = await $.clock.now()
+        await update($, agents, rows =>
+          rows.map((a): AgentRun =>
+            a.agentId !== agentId || a.status === 'running'
+              ? a
+              : { ...a, status: 'running', startedAt: at, seenAt: at, endedAt: undefined, round: a.round + 1, stepDone: undefined, stepTotal: undefined, stepNote: undefined, stepAt: undefined },
+          ),
+        )
+        await update($, now, () => at)
+      }
+    }
+    if (!e.agentId) {
+      const at = await $.clock.now()
+      await update($, main, () => ({ isWorking: true, startedAt: at, toolCalls: 0 }))
+      await update($, now, () => at)
+    }
+    return next(e)
+  })
+
+  // Every tool call of the main loop counts; a subagent's carries its agentId.
+  on('tool.call', async ($, e, next) => {
+    if (!e.agentId) {
+      const work = toolWork(e.tool, e as unknown as Record<string, unknown>)
+      await update($, main, m => (m.isWorking ? { ...m, toolCalls: m.toolCalls + 1, lastTool: e.tool, work } : m))
+    }
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) {
+      const ended = await $.clock.now()
+      await update($, main, m => ({ ...m, isWorking: false, endedAt: ended }))
+    }
     const agentId = e.agentId
     if (agentId) {
       const at = await $.clock.now()
@@ -1126,7 +1808,7 @@ export const register: Register = (on, options) => {
       return (
         <Box key={a.id} flexDirection="column" marginBottom={1}>
           <Box flexDirection="row" gap={1}>
-            <Text color={color}>▣</Text>
+            <Text color={color}>{WORK_GLYPH[workOf(a.type, a.description) ?? ''] ?? '▣'}</Text>
             <Text bold wrap="truncate-end">
               {a.description || a.type}
             </Text>
@@ -1135,14 +1817,16 @@ export const register: Register = (on, options) => {
           <Text dimColor wrap="truncate-end">
             {'  '}
             {tier === 'other' ? a.type : tierWord(tier)} · {model}
+            {workOf(a.type, a.description) ? ` · ${workWord(workOf(a.type, a.description) ?? '')}` : ''}
             {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
           </Text>
           <Text wrap="truncate-end">
             {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
+            {progress === null ? <Text dimColor>{ctxBar(0, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
               {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {agentLeft(a, at) === null ? '' : ` · ${fmtLeft(agentLeft(a, at) ?? 0)}`}
             </Text>
           </Text>
         </Box>
@@ -1203,8 +1887,60 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const f = await read($, flow)
-    if (f === null || e.props.hasSurvey) return next(e)
+    const reported = await read($, flow)
+    const list = await read($, agents)
+    // A reported flow wins, unless it is finished and new subagents are running.
+    const isLive = list.some(a => a.status === 'running')
+    const shown = reported && !(reported.isFinished && isLive) ? reported : autoFlow(list)
+    const f = shown && withPartial(shown, list)
+    if (e.props.hasSurvey) return next(e)
+    if (f === null) {
+      const m = await read($, main)
+      if (options.mainBar === 'off') return next(e)
+      const drawnBelow = await Promise.resolve(next(e)).catch(() => null)
+      const beneath = drawnBelow && typeof drawnBelow === 'object' && (drawnBelow as { type?: string }).type !== 'engine' ? drawnBelow : null
+      const at = Math.max(await read($, now), m.startedAt)
+      const ui = $.ui.resolve(e)
+      const { Box, Text, Button } = ui
+      // With subagents in the session, the count sits beside the crab here too, so the crab keeps its place as the bar changes.
+      const crew = list.length ? <Button key="savvy-agents" label={`×${list.length}`} plain onPress={() => void togglePane($)} /> : null
+      if (e.surface !== 'terminal' && 'Svg' in ui) {
+        const { Svg } = ui
+        const row = isRtl() ? 'row-reverse' : 'row'
+        const slot = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 16))
+        const head = headSvg(mainHead(m), m.isWorking ? ACCENT : DONE, m.isWorking)
+        const line = mainLine(m, at)
+        const stats = statSvg(line, Math.max(40, slot - head.width - bandCrabW - 80))
+        const work = mainCostume(m)
+        // Head and figures read as one phrase on the left; the crab holds the far edge; the gap between them is what the row has left.
+        return (
+          <Box flexDirection="column">
+            <Box key="savvy-main" flexDirection={row} justifyContent="space-between" alignItems="center">
+              <Box flexDirection={row} alignItems="center" gap="sm">
+                <Svg source={head.source} alt={mainHead(m)} width={head.width} height={H} />
+                {line ? <Svg source={stats.source} alt={line} width={stats.width} height={H} /> : null}
+              </Box>
+              <Box flexDirection={row} alignItems="center" gap="xs">
+                <Svg source={crabSvg(work, m.isWorking)} alt={work === 'rest' ? 'crab resting' : `crab at work: ${workWord(work)}`} width={bandCrabW} height={CRAB_H} />
+                {crew}
+              </Box>
+            </Box>
+            {beneath ? <Box key="savvy-below" flexDirection="column" marginTop="sm">{beneath}</Box> : null}
+          </Box>
+        )
+      }
+      return (
+        <Box flexDirection="column">
+          <Box key="savvy-main" flexDirection="row" gap={1}>
+            <Text color={m.isWorking ? ACCENT : DONE}>●</Text>
+            <Text bold>{mainHead(m)}</Text>
+            {m.isWorking && <Text color={colorOf(mainCostume(m))}>{WORK_GLYPH[mainCostume(m)] ?? '▣'}</Text>}
+            <Text dimColor wrap="truncate-end">{mainLine(m, at)}</Text>
+          </Box>
+          {beneath}
+        </Box>
+      )
+    }
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
@@ -1212,14 +1948,14 @@ export const register: Register = (on, options) => {
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const list = await read($, agents)
+    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+    const left = flowLeft(f, list, at)
     const crew = list.length + plannedOf(f, list).length
-    const isWorking = list.some(a => a.status === 'running')
     const crewButton = (
       <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
     )
     const percent = `${Math.round(ratio(f) * 100)}%`
-    const dismiss = (
+    const dismiss = f.isAuto ? null : (
       <Button
         key="savvy-dismiss"
         label="✕"
@@ -1232,17 +1968,35 @@ export const register: Register = (on, options) => {
     // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
     if (e.surface !== 'terminal' && 'Svg' in ui) {
       const { Svg } = ui
-      // About 8 CSS px per reported column; the rest is the count, the dismiss
-      // and their gaps. No floor above the slot: a row wider than it would wrap.
-      const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
+      const row = isRtl() ? 'row-reverse' : 'row'
+      // About 8 CSS px per reported column. The fixed pieces take their own width; the track takes
+      // most of what is left and the rest is spread as equal gaps between the four groups.
+      const slot = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 16))
+      const head = headSvg(f.title, f.isFinished ? DONE : ACCENT, false, slot * 0.3)
+      const stats = statSvg(left === null ? percent : `${percent} · ${fmtLeft(left)}`, 600, 'end')
+      const cluster = bandCrabW + 8 + 8 * String(crew).length + 26 + (dismiss ? 34 : 0)
+      const room = slot - head.width - stats.width - cluster
+      const trackW = Math.max(80, Math.round(room * TRACK_SHARE))
+      const m = await read($, main)
+      const costume = barCostume(f, list, m)
+      const picked = await read($, barStyleAtom)
+      const barStyle: BarStyle = isBarStyle(picked) ? picked : isBarStyle(options.barStyle) ? options.barStyle : 'liquid'
+      // The wall clock, not the once-a-second tick: the track's loops are phased by it.
+      const clockNow = await $.clock.now().catch(() => at)
+      const isBusy = list.some(a => a.status === 'running') || m.isWorking
       return (
         <Box flexDirection="column">
-          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
-            {crewButton}
-            {dismiss}
+          <Box flexDirection={row} justifyContent="space-between" alignItems="center">
+            <Svg source={head.source} alt={f.title} width={head.width} height={H} />
+            <Svg source={trackSvg(f, trackW, clockNow, barStyle)} alt={label(f)} width={trackW} height={H} />
+            <Svg source={stats.source} alt={left === null ? percent : `${percent}, ${fmtLeft(left)}`} width={stats.width} height={H} />
+            <Box flexDirection={row} alignItems="center" gap="xs">
+              <Svg source={crabSvg(costume, isBusy)} alt={costume === 'rest' ? 'crab resting' : `crab at work: ${workWord(costume)}`} width={bandCrabW} height={CRAB_H} />
+              {crewButton}
+              {dismiss}
+            </Box>
           </Box>
-          {below}
+          {below ? <Box key="savvy-below" flexDirection="column" marginTop="sm">{below}</Box> : null}
         </Box>
       )
     }
@@ -1260,6 +2014,7 @@ export const register: Register = (on, options) => {
           <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
           <Text bold>{label(f)}</Text>
           <Text dimColor>{percent}</Text>
+          {left !== null && <Text dimColor>{fmtLeft(left)}</Text>}
           <Text color={CLAY}>▣</Text>
           {crewButton}
           {dismiss}

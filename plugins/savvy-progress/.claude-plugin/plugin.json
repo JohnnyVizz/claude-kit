@@ -1,7 +1,7 @@
 {
   "name": "savvy-progress",
-  "version": "1.2.1",
-  "description": "Progress bar above the prompt for /savvy-flow, plus an agents panel (/agents-info): running, finished and planned subagents with model, task progress, context, cost and time.",
+  "version": "1.3.0",
+  "description": "Progress bar above the prompt (five animated styles, /bar-style), plus an agents panel (/agents-info): running, finished and planned subagents with model, task progress, time left, context, cost and time. Follows the main session too when no subagent runs.",
   "author": {
     "name": "johnnyvizz",
     "url": "https://github.com/johnnyvizz"
@@ -23,11 +23,45 @@
     "autoOpen": {
       "type": "string",
       "title": "Open the agents panel",
-      "description": "savvy: when a savvy-flow worker starts or a plan is reported; any: also when any other subagent starts",
+      "description": "savvy: when a savvy-flow worker starts or a plan is reported; any: also when any other subagent starts; always: as soon as a session starts",
       "default": "savvy",
       "options": [
         "savvy",
-        "any"
+        "any",
+        "always"
+      ]
+    },
+    "stepReports": {
+      "type": "string",
+      "title": "Step reports",
+      "description": "all: every subagent is asked to report its steps, so its row shows time left; savvy: only savvy-flow workers",
+      "default": "all",
+      "options": [
+        "all",
+        "savvy"
+      ]
+    },
+    "mainBar": {
+      "type": "string",
+      "title": "Show the main session's work",
+      "description": "on: with no subagents running, the bar shows the main session: tool calls, elapsed time and the last tool while it works, ready with the last turn's totals between turns; off: the bar is for subagents and flows only",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "barStyle": {
+      "type": "string",
+      "title": "Progress bar style",
+      "description": "liquid (the default): a liquid with a rippling edge, drifting ripples and rising bubbles; pixels: a dithered fill of twinkling pixels; crab: a crab walks the track to where the work has got to, leaving footprints; aurora: soft lights drift through the fill; circuit: a lit circuit trace with a pulse running to its head. /bar-style switches it from the prompt and wins over this.",
+      "default": "liquid",
+      "options": [
+        "liquid",
+        "pixels",
+        "crab",
+        "aurora",
+        "circuit"
       ]
     }
   },

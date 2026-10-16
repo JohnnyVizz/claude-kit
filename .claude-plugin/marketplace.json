@@ -1,7 +1,12 @@
 {
   "name": "claude-kit",
-  "owner": { "name": "johnnyvizz", "url": "https://github.com/johnnyvizz" },
-  "metadata": { "description": "johnnyvizz's public Claude Code skills and mods." },
+  "owner": {
+    "name": "johnnyvizz",
+    "url": "https://github.com/johnnyvizz"
+  },
+  "metadata": {
+    "description": "johnnyvizz's public Claude Code skills and mods."
+  },
   "plugins": [
     {
       "name": "savvy-flow",
@@ -13,8 +18,8 @@
     {
       "name": "savvy-progress",
       "source": "./plugins/savvy-progress",
-      "description": "Mod: progress bar above the prompt and a live agents panel; made for savvy-flow, shows any subagents.",
-      "version": "1.2.1",
+      "description": "Mod: animated progress bar above the prompt (five styles) and a live agents panel with time left; made for savvy-flow, follows any subagents and the main session.",
+      "version": "1.3.0",
       "category": "mod"
     },
     {
