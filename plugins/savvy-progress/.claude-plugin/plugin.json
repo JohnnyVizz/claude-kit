@@ -11,13 +11,14 @@
     "language": {
       "type": "string",
       "title": "Panel language",
-      "description": "auto follows Claude Code's language setting, then the system locale; en, ru or he (Hebrew, drawn right to left)",
+      "description": "auto follows Claude Code's language setting, then the system locale; en, ru, he (Hebrew, drawn right to left) or pt (Portuguese)",
       "default": "auto",
       "options": [
         "auto",
         "en",
         "ru",
-        "he"
+        "he",
+        "pt"
       ]
     },
     "autoOpen": {
