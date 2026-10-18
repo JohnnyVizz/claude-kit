@@ -981,11 +981,12 @@ export const register: Register = (on, options) => {
                 (usage.cache_creation_input_tokens || 0) +
                 (usage.output_tokens || 0),
               contextMax: windowOf(model),
+              // Cache reads are the same context re-read on every request; summing them
+              // inflates the total far past what the run spent, so they stay out.
               tokens:
                 a.tokens +
                 (usage.input_tokens || 0) +
                 (usage.output_tokens || 0) +
-                (usage.cache_read_input_tokens || 0) +
                 (usage.cache_creation_input_tokens || 0),
               costUsd: a.costUsd + costOf(model, usage, true),
               steps: a.steps + 1,
@@ -1014,7 +1015,6 @@ export const register: Register = (on, options) => {
                   tokens:
                     e.usage.input_tokens +
                     e.usage.output_tokens +
-                    e.usage.cache_read_input_tokens +
                     e.usage.cache_creation_input_tokens,
                   costUsd: costOf(e.usage.model || a.model, e.usage, false),
                 }
