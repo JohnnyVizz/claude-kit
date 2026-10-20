@@ -227,6 +227,16 @@ const label = (f: Flow): string => {
 
 const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? f.done / f.total : 0)
 
+// Workers run in the background by default, so an Agent call returns a few
+// milliseconds after its worker starts: counting `running` around the call
+// never saw one running. The band reads the flow's running workers from the
+// agent list instead.
+const isWorker = (f: Flow, a: AgentRun): boolean =>
+  tierOf(a.type) !== 'other' || (f.tasks ?? []).some(t => norm(t.title) === norm(a.description))
+
+const withRunning = (f: Flow, list: AgentRun[]): Flow =>
+  f.isFinished ? f : { ...f, running: list.filter(a => a.status === 'running' && isWorker(f, a)).length }
+
 // Deterministic noise so the dither does not shimmer between redraws.
 const noise = (x: number, y: number): number => {
   const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
@@ -906,22 +916,6 @@ export const register: Register = (on, options) => {
     return { result: matched ? 'ok' : `ignored: no panel row for agent ${agentId}` }
   })
 
-  // Safety net: worker launches move the faint layer even if the orchestrator forgets to report.
-  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
-    const type = String(e.subagent_type ?? '')
-    if (!type.startsWith('savvy-')) return next(e)
-
-    await update($, flow, prev => {
-      const base = prev && !prev.isFinished ? { ...blank(), ...prev } : blank()
-      return { ...base, running: base.running + 1, phase: base.phase === 'plan' ? 'delegate' : base.phase }
-    })
-    try {
-      return await next(e)
-    } finally {
-      await update($, flow, prev => (prev ? { ...prev, running: Math.max(0, prev.running - 1) } : prev))
-    }
-  })
-
   on('agent.spawn', async ($, e, next) => {
     const isUnbriefed = e.subagentType.startsWith('savvy-') && !e.prompt.includes(STEP_TOOL)
     const started = await next(isUnbriefed ? { ...e, prompt: e.prompt + STEP_BRIEF } : e)
@@ -949,6 +943,10 @@ export const register: Register = (on, options) => {
     })
     await update($, now, () => at)
     if (e.subagentType.startsWith('savvy-')) {
+      // A worker launched before any plan was reported still raises the band.
+      await update($, flow, (prev): Flow =>
+        prev && !prev.isFinished ? { ...prev, phase: prev.phase === 'plan' ? 'delegate' : prev.phase } : { ...blank(), phase: 'delegate' },
+      )
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
     } else if (options.autoOpen === 'any') {
@@ -1203,8 +1201,8 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const f = await read($, flow)
-    if (f === null || e.props.hasSurvey) return next(e)
+    const stored = await read($, flow)
+    if (stored === null || e.props.hasSurvey) return next(e)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
@@ -1213,6 +1211,7 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const list = await read($, agents)
+    const f = withRunning(stored, list)
     const crew = list.length + plannedOf(f, list).length
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = (
