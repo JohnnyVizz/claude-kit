@@ -235,7 +235,9 @@ const noise = (x: number, y: number): number => {
 
 // The whole row is one SVG: the desktop wraps sibling elements onto new lines,
 // so title, bar, percent and the crab live in one drawing; only the count and
-// the dismiss are Buttons beside it.
+// the dismiss are Buttons beside it. The editor draws the SVG as an image whose
+// color scheme follows the OS, not the editor theme, so there the title is a
+// Text beside it and the drawing keeps only colors that read on both.
 const H = 22
 const BAR_H = 16
 const CRAB_W = 26
@@ -271,10 +273,10 @@ const fitText = (s: string, size: number, maxW: number): string => {
   return out + '…'
 }
 
-const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
+const rowSvg = (f: Flow, W: number, isWorking: boolean, hasTitle = true): string => {
   // The title takes what it needs, up to 40% of the row; the bar takes the rest.
-  const title = fitText(f.title, 13, Math.max(60, W * 0.4))
-  const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
+  const title = hasTitle ? fitText(f.title, 13, Math.max(60, W * 0.4)) : ''
+  const BAR_X = hasTitle ? Math.round(16 + textWidth(title, 13) + 12) : 0
   const BAR_W = Math.max(60, W - BAR_X - 46 - CRAB_W)
   const color = f.isFinished ? DONE : ACCENT
   const y0 = (H - BAR_H) / 2
@@ -321,8 +323,8 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>
-.t{fill:#1f1f1f}.m{fill:#8a8a8a}.k{fill:#e4e4e2}.tk{fill:#b4b4b0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}.k{fill:#2c2c2c}.tk{fill:#5a5a5a}}
+.t{fill:#1f1f1f}.m{fill:#8f8f8f}.k{fill:#8a8a8a;fill-opacity:.22}.tk{fill:#8a8a8a;fill-opacity:.55}
+@media (prefers-color-scheme: dark){.t{fill:#ececec}}
 /* Pixels twinkle in four out-of-phase groups; a finished bar settles to a slow glow. */
 .t0,.t1,.t2,.t3{animation:tw ${f.isFinished ? 3.2 : 2.2}s ease-in-out infinite}
 .t1{animation-duration:${f.isFinished ? 3.8 : 2.8}s;animation-delay:-.7s}.t2{animation-duration:${f.isFinished ? 4.4 : 1.9}s;animation-delay:-1.3s}.t3{animation-duration:${f.isFinished ? 3.5 : 3.3}s;animation-delay:-.4s}
@@ -330,8 +332,8 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 @media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
 </style>
 <defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
-<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
+${hasTitle ? `<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
+<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>` : ''}
 <g transform="translate(${rx(BAR_X, BAR_W)},${y0})">
 <rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
 <g clip-path="url(#c)">
@@ -1234,11 +1236,16 @@ export const register: Register = (on, options) => {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
-      const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
+      const row = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
+      const isEditor = e.surface === 'vscode'
+      const title = fitText(f.title, 13, Math.max(60, row * 0.4))
+      const width = isEditor ? Math.max(120, Math.round(row - textWidth(title, 13) - 24)) : row
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+            {isEditor && <Text color={f.isFinished ? DONE : ACCENT}>●</Text>}
+            {isEditor && <Text bold>{title}</Text>}
+            <Svg source={rowSvg(f, width, isWorking, !isEditor)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
             {crewButton}
             {dismiss}
           </Box>
