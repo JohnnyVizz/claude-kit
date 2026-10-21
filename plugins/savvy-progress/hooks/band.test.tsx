@@ -13,7 +13,7 @@ async function session($: Engine, on: On) {
   await $.tool.call({ tool: 'mcp__savvy-progress__progress', title: 'Ship it', total: 4, done: 1, phase: 'delegate' } as never)
 }
 
-async function band($: Engine, surface: 'terminal' | 'desktop') {
+async function band($: Engine, surface: 'terminal' | 'desktop' | 'vscode') {
   const ui = await $.ui.mount({ plugin: 'savvy-progress', surface, ...BAND })
   const svg = await ui.findAll({ type: 'Svg' })
   const title = await ui.findAll({ type: 'Text', text: /^Ship it$/ })
@@ -30,4 +30,9 @@ test('terminal: the row draws the title, bar and label as text, not an Svg', asy
 test('desktop: the row is still one Svg', async ($, on) => {
   await session($, on)
   expect(await band($, 'desktop')).toEqual({ svg: 1, title: 0, label: 0 })
+})
+
+test('editor: the title is Text beside the Svg, so it takes the theme text color', async ($, on) => {
+  await session($, on)
+  expect(await band($, 'vscode')).toEqual({ svg: 1, title: 1, label: 0 })
 })
