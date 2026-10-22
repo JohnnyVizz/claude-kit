@@ -8,7 +8,7 @@ A Claude Code mod: a progress bar above the prompt and a live panel of subagents
 ## Tools it adds
 
 - `mcp__savvy-progress__progress`: the orchestrator reports the plan, phase and accepted tasks. Only the main session can: a call from a subagent is ignored, so a worker cannot rename, finish or reset the flow.
-- `mcp__savvy-progress__step`: a worker reports its own steps (`done`, `total`, `note`). A worker that does not report shows its context fill in grey instead. The tool is listed up front rather than behind ToolSearch, and each `savvy-*` worker gets one line at the end of its brief asking for these reports.
+- `mcp__savvy-progress__step`: a worker reports its own steps (`done`, `total`, `note`). A worker that does not report shows its context fill in grey instead. The tool is listed up front rather than behind ToolSearch, and each `savvy-*` worker (every subagent with `brief: any`) gets one line at the end of its brief asking for these reports.
 
 Cost is a rough estimate from token counts and a built-in per-model price table (`PRICES` in `hooks/register.tsx`, list prices as of 2026-10-10), not a bill. Cache writes are priced at the 1-hour rate, which is what Claude Code writes on a subscription; a session that writes 5-minute entries is overestimated there.
 
@@ -21,5 +21,7 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 ```
 
 `autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
+
+`brief`: `savvy` (default) or `any`. With `savvy` only `savvy-*` workers are asked to report their steps. With `any` every subagent is (general-purpose, Explore, your own agents), so their rows show steps instead of the grey context fill. A brief that already mentions `mcp__savvy-progress__step` is left alone, and an agent whose `tools:` list leaves out that tool still cannot report.
 
 Install instructions are in the [repository README](../../README.md).
