@@ -29,6 +29,16 @@
         "savvy",
         "any"
       ]
+    },
+    "brief": {
+      "type": "string",
+      "title": "Ask subagents to report their steps",
+      "description": "savvy: savvy-flow workers only; any: every subagent, so ordinary ones fill their panel rows too",
+      "default": "savvy",
+      "options": [
+        "savvy",
+        "any"
+      ]
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
