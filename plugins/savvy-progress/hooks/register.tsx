@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import { fade, mirror, paint, toCells } from './raster'
+import type { Cells, Shift } from './raster'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -20,7 +22,15 @@ const STEP_TOOL = 'mcp__savvy-progress__step'
 const STEP_BRIEF = `
 
 Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar.`
+// The same request for an agent that is not a savvy worker, under `reportSteps: any`:
+// its tools may be a list that leaves the step tool out, so it is asked conditionally.
+const STEP_BRIEF_ANY = `
+
+Progress reporting: if \`${STEP_TOOL}\` is among your tools, call it before other work with \`total\` (your plan in 3-8 steps) and \`done: 0\`, then again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar.`
 const PANE = 'savvy-agents'
+// The width the panel asks for when docked beside a fullscreen transcript: a row
+// crab, its lines and the stats beside the bar. A request; a width the person set wins.
+const DOCK_COLUMNS = 56
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
 const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light']
 // The tools' schemas are advice to the model, not a check: what a call may ask
@@ -445,6 +455,21 @@ const tierOf = (type: string): string => {
   return Object.hasOwn(TIER_COLOR, t) && bare.startsWith('savvy-') ? t : 'other'
 }
 
+// The tier a run reads as: its savvy tier, else the one its model and effort match
+// (TIER_MODEL): Fable is fable; on another model xhigh or max is heavy, high careful,
+// medium medium, low light. With no effort seen, other.
+const runTier = (a: AgentRun): string => {
+  const savvy = tierOf(a.type)
+  if (savvy !== 'other') return savvy
+  if (/fable|mythos/i.test(a.model)) return 'fable'
+  const effort = (a.effort ?? '').toLowerCase()
+  if (effort === 'xhigh' || effort === 'max') return 'heavy'
+  if (effort === 'high') return 'careful'
+  if (effort === 'medium') return 'medium'
+  if (effort === 'low') return 'light'
+  return 'other'
+}
+
 const modelName = (id: string): string => {
   const m = /(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/i.exec(id)
   const [, family = '', major = '', minor] = m ?? []
@@ -632,6 +657,110 @@ const crab = (x: number, y: number, costume: string, dim = false, isWalking = fa
   return `<g transform="${place}" opacity="${dim ? 0.45 : 1}" shape-rendering="crispEdges"><g class="c-${costume}${isWalking ? ' run' : ''}">${body}${group('la')}${group('lb')}</g></g>`
 }
 
+// --- terminal drawings: the same crabs as pixel art, two pixels to a Raster cell.
+
+// The `terminalCrabs` option: a crab beside each agent (`row`), the running agents'
+// crabs side by side at full size above the list (`stage`), or text only (`off`).
+type CrabMode = 'row' | 'stage' | 'off'
+// Module scope is fine here: register sets it again on every (re)load.
+let crabMode: CrabMode = 'row'
+const crabModeOf = (v: unknown): CrabMode => (v === 'stage' || v === 'off' ? v : 'row')
+
+const CRAB_GRID_H = 28
+// A row crab is a small crab drawn for the terminal, 9 × 8 pixels in 4 rows, as tall
+// as an agent's four lines: two rows of hat, then a body 7 wide with one-pixel eyes
+// and arms, then legs two pixels long. A small mark beside the text, not a block.
+const MINI_W = 9
+const MINI_H = 8
+const ROW_CRAB = { columns: MINI_W, rows: MINI_H / 2 }
+const STAGE_CRAB = { columns: CRAB_BOX, rows: CRAB_GRID_H / 2 }
+// Blank lines between two agents in the terminal.
+const ROW_GAP = 2
+// Columns a row needs beside its crab before the crab is worth drawing.
+const ROW_TEXT_MIN = 24
+
+// Two frames, a quarter second each, numbered off the clock so a redraw and a blit agree.
+const FRAME_MS = 250
+const frameAt = (ms: number): number => Math.floor(ms / FRAME_MS) % 2
+
+// The full crab's walk: the leg pairs lift in turn. No bob: one pixel of bob in
+// half-block cells reads as a jump.
+const walk =
+  (k: number): Shift =>
+  cls =>
+    cls === 'la' ? -k : cls === 'lb' ? k - 1 : 0
+
+// The mini crabs, one per costume, each the full crab's costume redrawn at this size:
+// the hat in the two rows above the body, the prop beside it. `frames` are the pixels
+// each of the two frames changes while it works (the prop's motion: a blink, a swing);
+// `walks` false keeps the legs still (the astronaut floats). Walking, the leg pairs
+// lift in turn, a pixel shorter rather than gone: a one-pixel leg lifted would vanish
+// and read as a flicker.
+type MiniCostume = { rows: string[]; frames?: [x: number, y: number, ch: string][][]; walks?: false }
+
+const MINI_PALETTE: Record<string, string> = {
+  c: CLAY, k: INK, K: '#55514C', w: '#F8F6F1', G: '#E6E8EE', g: '#C9CCD2', y: '#F5C542', Y: '#C99A1E',
+  b: '#7A4A26', B: '#5A3519', l: '#A9D6F5', s: '#8E929A', P: '#4A4A48', Z: '#F5C542',
+  p: TIER_COLOR.fable ?? '#7F77DD', r: TIER_COLOR.light ?? '#1D9E75', u: TIER_COLOR.medium ?? '#378ADD', a: TIER_COLOR.careful ?? '#BA7517',
+}
+const MINI_HATLESS = ['.........', '.........']
+const MINI_BODY = ['.ccccccc.', '.ckccckc.', 'ccccccccc', '.ccccccc.']
+const MINI_LEGS = '.c.c.c.c.'
+const MINI_LIFTED = ['...c...c.', '.c...c...']
+
+const MINI_COSTUMES: Record<string, MiniCostume> = {
+  other: { rows: [...MINI_HATLESS, ...MINI_BODY] },
+  // Astronaut: the dome around the body, the antenna; floats, the star blinks.
+  fable: { rows: ['....p...Z', '.GGGGGGG.', 'GcccccccG', 'GckccckcG', 'ccccccccc', 'GccppcccG'], frames: [[], [[8, 0, '.']]], walks: false },
+  // Detective: deerstalker; the magnifier glints.
+  heavy: { rows: ['..bbbbb.s', '.BBBBBBBl', '.ccccccc.', '.ckccckc.', 'ccccccccb', '.ccccccc.'], frames: [[], [[8, 1, 'w']]] },
+  // Engineer: hard hat; the wrench turns.
+  careful: { rows: ['..yyyyy..', '.YYYaYYY.', '.ccccccc.', '.ckccckc.', 'sccccccc.', '.ccccccc.'], frames: [[], [[0, 4, 'c'], [0, 3, 's']]] },
+  // Chef: toque and band; the omelette leaves the pan.
+  medium: { rows: ['.ww.w.ww.', '.wwwwwww.', '.uuuuuuu.', '.ckccckc.', 'ccccccPPP', '.ccccccc.'], frames: [[], [[8, 3, 'y']]] },
+  // Racer: helmet and visor; the flag flutters.
+  light: { rows: ['..rrwrr.w', '.rrrwrrrs', '.ccccccc.', '.kkkkkkk.', 'ccccccccs', '.ccccccc.'], frames: [[], [[8, 0, 'K']]] },
+  // Pirate: tricorn, band and eyepatch; the cutlass rises.
+  explore: { rows: ['.K.KKK.K.', '.KKKKKKK.', '.ZZZZZZZ.', '.ckcckkc.', 'ccccccccs', '.ccccccc.'], frames: [[], [[8, 4, 'c'], [8, 3, 's']]] },
+}
+
+const miniCrab = (f: Fill, costume: string, frame: number | null): void => {
+  const c = MINI_COSTUMES[costume] ?? MINI_COSTUMES.other ?? { rows: [] }
+  const rows = c.rows.map(r => [...r])
+  for (const [x, y, ch] of frame === null ? [] : (c.frames?.[frame % 2] ?? [])) {
+    const row = rows[y]
+    if (row && x < row.length) row[x] = ch
+  }
+  stamp(f, 0, 0, rows.map(r => r.join('')), MINI_PALETTE)
+  const lifted = frame === null || c.walks === false ? MINI_LEGS : (MINI_LIFTED[frame % 2] ?? MINI_LEGS)
+  stamp(f, 0, rows.length, [MINI_LEGS, lifted], MINI_PALETTE)
+}
+
+// Planned tasks' crabs are drawn faded, as the desktop draws them at 45% opacity: mixed
+// toward a dark terminal's background, which most are.
+const FADE = 0.45
+const FADE_GROUND = 0x1e1e1e
+
+const cellCache = new Map<string, Cells>()
+
+// `frame` null: standing still.
+const crabCells = (costume: string, frame: number | null, isMini: boolean, isFaded = false): Cells => {
+  const id = `${costume}|${frame}|${isMini}|${isFaded}|${isRtl()}`
+  const hit = cellCache.get(id)
+  if (hit) return hit
+  const draw = COSTUMES[costume] ?? ((g: Fill) => crabBody(g))
+  let p = isMini
+    ? paint(f => miniCrab(f, costume, frame), MINI_W, MINI_H)
+    : paint(f => draw(f, colorOf(costume)), CRAB_BOX, CRAB_GRID_H, frame === null ? undefined : walk(frame))
+  if (isFaded) p = fade(p, FADE, FADE_GROUND)
+  if (isRtl()) p = mirror(p)
+  const cells = toCells(p)
+  cellCache.set(id, cells)
+  return cells
+}
+
+const crabKey = (a: AgentRun): string => `crab-${a.id}`
+
 const statusMark = (x: number, y: number, status: string, color: string): string => {
   if (status === 'running') return `<circle class="live" cx="${x}" cy="${y}" r="3.5" fill="${color}"/>`
   if (status === 'done') return `<path d="M${x - 5} ${y}l3.5 3.5 6.5-7" fill="none" stroke="#3B9C5F" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
@@ -763,10 +892,13 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnTy
 
 // --- terminal drawing: the same rows in text.
 
-const ctxBar = (pct: number, width: number): string => {
-  const filled = Math.round((width * pct) / 100)
-  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
+// The terminal's progress bar, three eighths of a cell tall as the desktop's is a thin
+// strip under the text: the filled part and the rest.
+const thinBar = (pct: number, width: number): [string, string] => {
+  const filled = Math.max(0, Math.min(width, Math.round((width * pct) / 100)))
+  return ['▃'.repeat(filled), '▃'.repeat(width - filled)]
 }
+const BAR_REST = '#3c3c3a'
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
@@ -779,7 +911,7 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   }
   const at = await $.clock.now()
   await update($, now, () => at)
-  await $.ui.open({ id: PANE, title: tr().pane })
+  await $.ui.open({ id: PANE, title: tr().pane, columns: DOCK_COLUMNS })
   return true
 }
 
@@ -787,10 +919,11 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   const p = await read($, panel)
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
-  void $.ui.open({ id: PANE, title: tr().pane })
+  void $.ui.open({ id: PANE, title: tr().pane, columns: DOCK_COLUMNS })
 }
 
 export const register: Register = (on, options) => {
+  crabMode = crabModeOf(options.terminalCrabs)
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
@@ -858,6 +991,21 @@ export const register: Register = (on, options) => {
         await update($, now, () => at)
       })()
     })
+    // Walks the running agents' terminal crabs: each frame blitted into its Raster,
+    // no redraw. Where none is mounted (the desktop, a closed panel) the blit is denied.
+    $.clock.every(FRAME_MS, () => {
+      if (crabMode === 'off') return
+      void (async () => {
+        const list = await read($, agents)
+        const running = list.filter(a => a.status === 'running')
+        if (!running.length) return
+        const k = frameAt(await $.clock.now())
+        for (const a of running) {
+          const { cells } = crabCells(costumeOf(a.type), k, crabMode === 'row')
+          await $.ui.blit({ requestId: PANE, key: crabKey(a), cells }).catch(() => undefined)
+        }
+      })()
+    })
     return started
   })
 
@@ -866,7 +1014,7 @@ export const register: Register = (on, options) => {
     if ((e.args ?? '').trim() === 'open') {
       const at = await $.clock.now()
       await update($, now, () => at)
-      await $.ui.open({ id: PANE, title: tr().pane })
+      await $.ui.open({ id: PANE, title: tr().pane, columns: DOCK_COLUMNS })
       return { text: tr().opened }
     }
     const isOpen = await togglePane($)
@@ -923,8 +1071,10 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const isUnbriefed = e.subagentType.startsWith('savvy-') && !e.prompt.includes(STEP_TOOL)
-    const started = await next(isUnbriefed ? { ...e, prompt: e.prompt + STEP_BRIEF } : e)
+    const isSavvy = e.subagentType.startsWith('savvy-')
+    const brief = isSavvy ? STEP_BRIEF : options.reportSteps === 'any' ? STEP_BRIEF_ANY : ''
+    const isUnbriefed = brief !== '' && !e.prompt.includes(STEP_TOOL)
+    const started = await next(isUnbriefed ? { ...e, prompt: e.prompt + brief } : e)
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
@@ -1113,38 +1263,85 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // Terminal: the same content in text rows.
+    // Terminal: the same content in text rows, with pixel crabs where the
+    // surface has a Raster and the panel has room for them.
     const cols = Math.max(24, e.props.bodyColumns || 40)
-    const barW = Math.max(6, Math.min(20, cols - 34))
+    const Raster = e.surface === 'terminal' && 'Raster' in ui ? ui.Raster : null
+    const hasRowCrabs = Raster !== null && crabMode === 'row' && cols >= ROW_CRAB.columns + 1 + ROW_TEXT_MIN
+    const stageFits = Math.floor((cols + 1) / (STAGE_CRAB.columns + 1))
+    const hasStage = Raster !== null && crabMode === 'stage' && stageFits > 0 && running.length > 0
+    const textCols = hasRowCrabs ? cols - ROW_CRAB.columns - 1 : cols
+    // The bar spans the text column, as the desktop's spans the row.
+    const barW = Math.max(6, textCols - (hasRowCrabs ? 0 : 2))
+    const frame = frameAt(at)
+    const crabOf = (a: AgentRun, size: typeof ROW_CRAB) =>
+      Raster && (
+        <Raster
+          key={crabKey(a)}
+          columns={size.columns}
+          rows={size.rows}
+          cells={crabCells(costumeOf(a.type), a.status === 'running' ? frame : null, size === ROW_CRAB).cells}
+        />
+      )
     const row = (a: AgentRun) => {
-      const tier = tierOf(a.type)
+      // As the desktop draws a row: the tier word in its color (for an agent that is
+      // not a savvy worker, its type, in the color of its model and effort), the model
+      // muted, the task's steps, and a bar in the tier's color.
+      const savvy = tierOf(a.type)
+      const tier = runTier(a)
       const color = colorOf(tier)
       const ctx = ctxOf(a)
       const progress = progressOf(a)
-      const model = runModel(a)
-      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
-      return (
-        <Box key={a.id} flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" gap={1}>
-            <Text color={color}>▣</Text>
-            <Text bold wrap="truncate-end">
-              {a.description || a.type}
+      const n = list.indexOf(a) + 1
+      const [filled, rest] = thinBar(progress === null ? ctx : progress * 100, barW)
+      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
+      const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}`
+      const indent = hasRowCrabs ? '' : '  '
+      const lines = (
+        <Box flexDirection="column" flexGrow={1}>
+          <Box flexDirection="row" justifyContent="space-between" gap={1}>
+            <Text wrap="truncate-end">
+              {!hasRowCrabs && <Text color={color}>▣ </Text>}
+              <Text bold>
+                {n}. {a.description || a.type}
+              </Text>
+              <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}> {STATUS_GLYPH[a.status]}</Text>
             </Text>
-            <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
+            <Text dimColor>{fmtTime(elapsed(a, at))}</Text>
           </Box>
-          <Text dimColor wrap="truncate-end">
-            {'  '}
-            {tier === 'other' ? a.type : tierWord(tier)} · {model}
-            {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
-          </Text>
           <Text wrap="truncate-end">
-            {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
+            {indent}
+            <Text color={color}>{savvy === 'other' ? a.type : tierWord(savvy)}</Text>
             <Text dimColor>
-              {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {'  '}
+              {runModel(a)}
+              {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
             </Text>
           </Text>
+          <Box flexDirection="row" justifyContent="space-between" gap={2}>
+            <Text wrap="truncate-end">
+              {indent}
+              {steps}
+            </Text>
+            <Text dimColor>{stats}</Text>
+          </Box>
+          <Text wrap="truncate-end">
+            {indent}
+            <Text color={a.status === 'failed' ? 'red' : progress === null ? TIER_COLOR.other : color}>{filled}</Text>
+            <Text color={BAR_REST}>{rest}</Text>
+          </Text>
+        </Box>
+      )
+      if (!hasRowCrabs)
+        return (
+          <Box key={a.id} marginBottom={ROW_GAP}>
+            {lines}
+          </Box>
+        )
+      return (
+        <Box key={a.id} flexDirection={isRtl() ? 'row-reverse' : 'row'} gap={1} marginBottom={ROW_GAP}>
+          {crabOf(a, ROW_CRAB)}
+          {lines}
         </Box>
       )
     }
@@ -1160,6 +1357,18 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
         </Text>
+        {hasStage && !p.isCompact && (
+          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} gap={1} marginTop={1}>
+            {running.slice(0, stageFits).map(a => (
+              <Box key={`stage-${a.id}`} flexDirection="column" width={STAGE_CRAB.columns}>
+                {crabOf(a, STAGE_CRAB)}
+                <Text color={colorOf(tierOf(a.type))} wrap="truncate-end">
+                  {a.description || a.type}
+                </Text>
+              </Box>
+            ))}
+          </Box>
+        )}
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
@@ -1176,23 +1385,51 @@ export const register: Register = (on, options) => {
         ) : (
           <Box flexDirection="column" marginTop={1}>
             {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
+            {running.length > 0 && (
+              <Box marginBottom={1}>
+                <Text dimColor>
+                  {s.running} · {running.length}
+                </Text>
+              </Box>
+            )}
             {running.map(row)}
-            {finished.length > 0 && toggleDone}
+            {finished.length > 0 && <Box marginBottom={p.isDoneCollapsed ? 0 : 1}>{toggleDone}</Box>}
             {!p.isDoneCollapsed && finished.map(row)}
-            {planned.length > 0 && <Text dimColor>{s.planned} · {planned.length}</Text>}
+            {planned.length > 0 && (
+              <Box marginBottom={1}>
+                <Text dimColor>
+                  {s.planned} · {planned.length}
+                </Text>
+              </Box>
+            )}
             {planned.map(pl => {
               const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
-              return (
-                <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
+              const lines = (
+                <Box flexDirection="column" flexGrow={1}>
                   <Text dimColor wrap="truncate-end">
-                    <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
+                    {!hasRowCrabs && <Text color={colorOf(tier)}>▢ </Text>}
+                    {pl.n}. {pl.title} ◷
                   </Text>
-                  <Text dimColor wrap="truncate-end">
-                    {'  '}
-                    {tierWord(tier)} · {tierModel(tier)}
-                    {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
+                  <Text wrap="truncate-end">
+                    {hasRowCrabs ? '' : '  '}
+                    <Text color={colorOf(tier)}>{tierWord(tier)}</Text>
+                    <Text dimColor>
+                      {'  '}
+                      {tierModel(tier)}
+                      {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
+                    </Text>
                   </Text>
+                </Box>
+              )
+              // A planned task's crab stands faded in its tier's costume, as on the desktop.
+              return Raster && hasRowCrabs ? (
+                <Box key={`plan-${pl.n}`} flexDirection={isRtl() ? 'row-reverse' : 'row'} gap={1} marginBottom={ROW_GAP}>
+                  <Raster key={`crab-plan-${pl.n}`} columns={ROW_CRAB.columns} rows={ROW_CRAB.rows} cells={crabCells(tier, null, true, true).cells} />
+                  {lines}
+                </Box>
+              ) : (
+                <Box key={`plan-${pl.n}`} marginBottom={1}>
+                  {lines}
                 </Box>
               )
             })}

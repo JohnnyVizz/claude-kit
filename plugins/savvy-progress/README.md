@@ -22,4 +22,8 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 
 `autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
 
+`terminalCrabs`: `row` (default), `stage` or `off`. In the terminal the crabs are pixel art, two pixels to a cell (half blocks in true color), and the running ones walk. `row` puts a small crab beside each agent (9 columns by 3 rows; text only when the panel is narrower than 34 columns): as the desktop draws a row: the task and its time; the tier word in its color (for an agent that is not a savvy worker, its type, in the color of the tier its model and effort match) and the model; its steps and numbers; and, while it runs, a bar in that color. Each agent is numbered in the order it started; `stage` draws the running agents' crabs at full size (30 by 14) side by side above the list; `off` keeps the text rows only. The desktop's crabs do not change. Docked beside a fullscreen transcript (`/tui fullscreen`, 110 columns or more) the panel asks for 56 columns; elsewhere it sits above the prompt.
+
+`reportSteps`: `savvy` (default) or `any`. Savvy workers are asked in their brief to report their steps (the `step` tool), which the panel shows as `1/4 · note` and as the bar. With `any` every other subagent is asked too, when the tool is among its tools.
+
 Install instructions are in the [repository README](../../README.md).

@@ -29,6 +29,27 @@
         "savvy",
         "any"
       ]
+    },
+    "terminalCrabs": {
+      "type": "string",
+      "title": "Crabs in the terminal",
+      "description": "row: a pixel crab beside each agent; stage: the running agents' crabs at full size above the list; off: text only",
+      "default": "row",
+      "options": [
+        "row",
+        "stage",
+        "off"
+      ]
+    },
+    "reportSteps": {
+      "type": "string",
+      "title": "Ask agents for their steps",
+      "description": "savvy: only savvy-flow workers are asked to report their steps; any: every subagent is asked, when the step tool is among its tools",
+      "default": "savvy",
+      "options": [
+        "savvy",
+        "any"
+      ]
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
