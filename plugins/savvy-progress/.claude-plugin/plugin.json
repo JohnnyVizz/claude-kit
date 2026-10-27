@@ -11,13 +11,14 @@
     "language": {
       "type": "string",
       "title": "Panel language",
-      "description": "auto follows Claude Code's language setting, then the system locale; en, ru or he (Hebrew, drawn right to left)",
+      "description": "auto follows Claude Code's language setting, then the system locale; en, ru, he (Hebrew, drawn right to left) or es",
       "default": "auto",
       "options": [
         "auto",
         "en",
         "ru",
-        "he"
+        "he",
+        "es"
       ]
     },
     "autoOpen": {
@@ -29,6 +30,33 @@
         "savvy",
         "any"
       ]
+    },
+    "terminalCrabs": {
+      "type": "string",
+      "title": "Crabs in the terminal",
+      "description": "row: a pixel crab beside each agent; stage: the running agents' crabs at full size above the list; off: text only",
+      "default": "row",
+      "options": [
+        "row",
+        "stage",
+        "off"
+      ]
+    },
+    "reportSteps": {
+      "type": "string",
+      "title": "Ask agents for their steps",
+      "description": "savvy: only savvy-flow workers are asked to report their steps; any: every subagent is asked, when the step tool is among its tools",
+      "default": "savvy",
+      "options": [
+        "savvy",
+        "any"
+      ]
+    },
+    "costumes": {
+      "type": "string",
+      "title": "Costume per agent type",
+      "description": "type=costume pairs, comma-separated (for example explorador=explore,revisor=heavy): the costume (fable, heavy, careful, medium, light, explore or other) an agent type wears; any other agent dresses for its savvy tier, or its model and effort",
+      "default": ""
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",

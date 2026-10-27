@@ -14,12 +14,18 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 
 ## Settings
 
-`language`: `auto` (default), `en`, `ru` or `he`. Hebrew draws the bar and the panel right to left. `auto` follows Claude Code's `language` setting, then the system locale, and falls back to English. Set it in `/config`, or, for a mod loaded by hand, in `~/.claude/settings.json`:
+`language`: `auto` (default), `en`, `ru`, `he` or `es`. Hebrew draws the bar and the panel right to left. `auto` follows Claude Code's `language` setting, then the system locale, and falls back to English. Set it in `/config`, or, for a mod loaded by hand, in `~/.claude/settings.json`:
 
 ```json
 { "pluginConfigs": { "savvy-progress": { "options": { "language": "ru" } } } }
 ```
 
 `autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
+
+`terminalCrabs`: `row` (default), `stage` or `off`. In the terminal the crabs are pixel art, two pixels to a cell (half blocks in true color), and the running ones walk. `row` puts a small crab beside each agent (9 columns by 3 rows; text only when the panel is narrower than 34 columns): as the desktop draws a row: the task and its time; the tier word in its color (for an agent that is not a savvy worker, its type, in the color of the tier its model and effort match) and the model; its steps and numbers; and, while it runs, a bar in that color. Each agent is numbered in the order it started; `stage` draws the running agents' crabs at full size (30 by 14) side by side above the list; `off` keeps the text rows only. The desktop's crabs do not change. Docked beside a fullscreen transcript (`/tui fullscreen`, 110 columns or more) the panel asks for 56 columns; elsewhere it sits above the prompt.
+
+`reportSteps`: `savvy` (default) or `any`. Savvy workers are asked in their brief to report their steps (the `step` tool), which the panel shows as `1/4 · note` and as the bar. With `any` every other subagent is asked too, when the tool is among its tools.
+
+`costumes`: `type=costume` pairs, comma-separated, for example `explorador=explore,revisor=heavy`. An agent of a listed type wears that costume (`fable`, `heavy`, `careful`, `medium`, `light`, `explore` or `other`) and, for a tier, its color. Any other agent dresses for its savvy tier; `Explore` is the pirate; the rest dress for their model and effort: Fable is the astronaut, and on another model `xhigh` or `max` is the detective, `high` the engineer, `medium` the chef and `low` the racer. Before an agent's first model request its effort is unknown, and it is the plain crab.
 
 Install instructions are in the [repository README](../../README.md).
