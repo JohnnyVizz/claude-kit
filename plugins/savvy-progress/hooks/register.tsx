@@ -179,8 +179,15 @@ const blank = (): Flow => ({
   tasks: [],
 })
 
+// A call opens a flow only when it brings one. Fields left out keep their value,
+// so a bare `done` or `phase` after the close still belongs to the flow that closed.
+const opensFlow = (input: ProgressInput): boolean =>
+  input.title !== undefined || input.tasks !== undefined || input.total !== undefined
+
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
-  !prev || prev.isFinished || (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
+  !prev ||
+  (prev.isFinished && opensFlow(input)) ||
+  (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
 
 // Only a known tier is kept: the name is later a key into the tier tables.
 const tierName = (v: string): string => {
@@ -211,7 +218,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
     total,
     done,
     phase: input.finished ? 'close' : phase,
-    isFinished: input.finished === true,
+    isFinished: input.finished === undefined ? base.isFinished : input.finished === true,
     tasks,
   }
 }
@@ -438,11 +445,14 @@ const costOf = (model: string, u: Usage, isRequest: boolean): number => {
 // Haiku 4.5 and the Claude 3 models have a 200K window; the rest, Haiku 5.5 included, 1M.
 const windowOf = (model: string): number => (/haiku-4|claude-3/i.test(model) ? 200_000 : 1_000_000)
 
+// A worker of the flow, by its name past an optional `<plugin>:` prefix: the plugin
+// name starts with `savvy-` itself, so `savvy-flow:general-purpose` is not one.
+const isSavvy = (type: string): boolean => type.replace(/^[^:]*:/, '').startsWith('savvy-')
+
 // `savvy-careful`, or `savvy-flow:savvy-careful` when the agents ship in a plugin.
 const tierOf = (type: string): string => {
-  const bare = type.replace(/^[^:]*:/, '')
-  const t = bare.replace(/^savvy-/, '').toLowerCase()
-  return Object.hasOwn(TIER_COLOR, t) && bare.startsWith('savvy-') ? t : 'other'
+  const t = type.replace(/^[^:]*:/, '').replace(/^savvy-/, '').toLowerCase()
+  return isSavvy(type) && Object.hasOwn(TIER_COLOR, t) ? t : 'other'
 }
 
 const modelName = (id: string): string => {
@@ -909,7 +919,7 @@ export const register: Register = (on, options) => {
   // Safety net: worker launches move the faint layer even if the orchestrator forgets to report.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     const type = String(e.subagent_type ?? '')
-    if (!type.startsWith('savvy-')) return next(e)
+    if (!isSavvy(type)) return next(e)
 
     await update($, flow, prev => {
       const base = prev && !prev.isFinished ? { ...blank(), ...prev } : blank()
@@ -923,7 +933,7 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const isUnbriefed = e.subagentType.startsWith('savvy-') && !e.prompt.includes(STEP_TOOL)
+    const isUnbriefed = isSavvy(e.subagentType) && !e.prompt.includes(STEP_TOOL)
     const started = await next(isUnbriefed ? { ...e, prompt: e.prompt + STEP_BRIEF } : e)
     if (started.deny !== undefined) return started
 
@@ -948,7 +958,7 @@ export const register: Register = (on, options) => {
       return [...list.filter(a => a.id !== run.id), run].slice(-200)
     })
     await update($, now, () => at)
-    if (e.subagentType.startsWith('savvy-')) {
+    if (isSavvy(e.subagentType)) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
     } else if (options.autoOpen === 'any') {

@@ -1,7 +1,9 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 const PLUGIN = 'savvy-progress'
 const PROGRESS = 'mcp__savvy-progress__progress'
+const STEP = 'mcp__savvy-progress__step'
 
 const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
 const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
@@ -15,6 +17,13 @@ const plan = {
     { title: 'Wire the CLI', tier: 'light', after: [1] },
   ],
 } as const
+
+// The band's row is one Svg on the desktop and plain Text in the terminal.
+const draws = async ($: Engine, surface: 'terminal' | 'desktop', text: RegExp): Promise<boolean> => {
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
+  const svg = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
+  return text.test(svg) || (await ui.findAll({ type: 'Text', text })).length > 0
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: the band shows what the flow reports`, async ($, on) => {
@@ -58,6 +67,33 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(drawn).not.toContain('[object')
   })
 
+  // The orchestrator closes the flow with `finished: true`; a later call that brings
+  // no flow of its own still reports the one that closed, instead of resetting it.
+  test(`${surface}: a bare report after the close keeps the finished flow`, async ($, on) => {
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+
+    const planned = await $.tool.call({ tool: PROGRESS, title: 'Closing flow', phase: 'delegate', total: 4, done: 3 } as never)
+    expect(planned).toMatchObject({ result: 'ok: Tasks 3/4' })
+    expect(await $.tool.call({ tool: PROGRESS, finished: true } as never)).toMatchObject({ result: 'ok: Done' })
+    expect(await $.tool.call({ tool: PROGRESS, done: 4 } as never)).toMatchObject({ result: 'ok: Done' })
+
+    // `finished: false` reopens that same flow: its title and the total it closed with.
+    expect(await $.tool.call({ tool: PROGRESS, finished: false } as never)).toMatchObject({ result: 'ok: Tasks 4/4' })
+    expect(await draws($, surface, /Closing flow/)).toBe(true)
+  })
+
+  test(`${surface}: a flow brought after the close starts over`, async ($, on) => {
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+
+    await $.tool.call({ tool: PROGRESS, title: 'Closing flow', phase: 'delegate', total: 4, done: 3 } as never)
+    await $.tool.call({ tool: PROGRESS, finished: true } as never)
+
+    const second = await $.tool.call({ tool: PROGRESS, title: 'Fresh flow', phase: 'delegate', total: 2 } as never)
+    expect(second).toMatchObject({ result: 'ok: Tasks 0/2' })
+    expect(await draws($, surface, /Fresh flow/)).toBe(true)
+    expect(await draws($, surface, /Closing flow/)).toBe(false)
+  })
+
   // The stored title is clipped, so the incoming one is clipped before the two are compared.
   test(`${surface}: a title past the cap is still the same flow`, async ($, on) => {
     on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -73,3 +109,38 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(started).toMatchObject({ result: 'ok: Tasks 0/3' })
   })
 }
+
+// A plugin name of its own starts with `savvy-`, so only the agent's name past the
+// `<plugin>:` prefix tells a worker of the flow from any other agent beside it.
+test('spawn: a plugin-mate that is not a savvy worker is left to itself', async ($, on) => {
+  mock.clock(on)
+  const opened: string[] = []
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  const prompts: string[] = []
+  on('agent.spawn', (_$, e) => {
+    prompts.push(e.prompt)
+    return { model: 'claude-opus-5', agentId: `a${prompts.length}` }
+  })
+  const spawn = (subagentType: string) =>
+    $.agent.spawn({
+      tool_use_id: `t${prompts.length + 1}`,
+      prompt: 'p',
+      description: subagentType,
+      subagentType,
+      provider: 'engine',
+      parentModel: 'claude-opus-5',
+      background: false,
+      fork: false,
+    } as never)
+
+  await spawn('savvy-flow:general-purpose')
+  expect(opened).toEqual([])
+  expect(prompts).toEqual(['p'])
+
+  await spawn('savvy-flow:savvy-careful')
+  expect(prompts[1]).toContain(STEP)
+  expect(opened).toEqual(['savvy-agents'])
+})
