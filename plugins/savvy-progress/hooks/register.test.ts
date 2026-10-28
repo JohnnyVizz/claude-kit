@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 const PLUGIN = 'savvy-progress'
 const PROGRESS = 'mcp__savvy-progress__progress'
@@ -16,6 +17,13 @@ const plan = {
     { title: 'Wire the CLI', tier: 'light', after: [1] },
   ],
 } as const
+
+// The band's row is one Svg on the desktop and plain Text in the terminal.
+const draws = async ($: Engine, surface: 'terminal' | 'desktop', text: RegExp): Promise<boolean> => {
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
+  const svg = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
+  return text.test(svg) || (await ui.findAll({ type: 'Text', text })).length > 0
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: the band shows what the flow reports`, async ($, on) => {
@@ -57,6 +65,33 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const drawn = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
     expect(drawn).not.toContain('native code')
     expect(drawn).not.toContain('[object')
+  })
+
+  // The orchestrator closes the flow with `finished: true`; a later call that brings
+  // no flow of its own still reports the one that closed, instead of resetting it.
+  test(`${surface}: a bare report after the close keeps the finished flow`, async ($, on) => {
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+
+    const planned = await $.tool.call({ tool: PROGRESS, title: 'Closing flow', phase: 'delegate', total: 4, done: 3 } as never)
+    expect(planned).toMatchObject({ result: 'ok: Tasks 3/4' })
+    expect(await $.tool.call({ tool: PROGRESS, finished: true } as never)).toMatchObject({ result: 'ok: Done' })
+    expect(await $.tool.call({ tool: PROGRESS, done: 4 } as never)).toMatchObject({ result: 'ok: Done' })
+
+    // `finished: false` reopens that same flow: its title and the total it closed with.
+    expect(await $.tool.call({ tool: PROGRESS, finished: false } as never)).toMatchObject({ result: 'ok: Tasks 4/4' })
+    expect(await draws($, surface, /Closing flow/)).toBe(true)
+  })
+
+  test(`${surface}: a flow brought after the close starts over`, async ($, on) => {
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+
+    await $.tool.call({ tool: PROGRESS, title: 'Closing flow', phase: 'delegate', total: 4, done: 3 } as never)
+    await $.tool.call({ tool: PROGRESS, finished: true } as never)
+
+    const second = await $.tool.call({ tool: PROGRESS, title: 'Fresh flow', phase: 'delegate', total: 2 } as never)
+    expect(second).toMatchObject({ result: 'ok: Tasks 0/2' })
+    expect(await draws($, surface, /Fresh flow/)).toBe(true)
+    expect(await draws($, surface, /Closing flow/)).toBe(false)
   })
 
   // The stored title is clipped, so the incoming one is clipped before the two are compared.

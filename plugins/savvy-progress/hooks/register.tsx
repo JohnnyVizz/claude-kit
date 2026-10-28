@@ -179,8 +179,15 @@ const blank = (): Flow => ({
   tasks: [],
 })
 
+// A call opens a flow only when it brings one. Fields left out keep their value,
+// so a bare `done` or `phase` after the close still belongs to the flow that closed.
+const opensFlow = (input: ProgressInput): boolean =>
+  input.title !== undefined || input.tasks !== undefined || input.total !== undefined
+
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
-  !prev || prev.isFinished || (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
+  !prev ||
+  (prev.isFinished && opensFlow(input)) ||
+  (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
 
 // Only a known tier is kept: the name is later a key into the tier tables.
 const tierName = (v: string): string => {
@@ -211,7 +218,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
     total,
     done,
     phase: input.finished ? 'close' : phase,
-    isFinished: input.finished === true,
+    isFinished: input.finished === undefined ? base.isFinished : input.finished === true,
     tasks,
   }
 }
