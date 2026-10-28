@@ -1,7 +1,8 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PLUGIN = 'savvy-progress'
 const PROGRESS = 'mcp__savvy-progress__progress'
+const STEP = 'mcp__savvy-progress__step'
 
 const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
 const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
@@ -73,3 +74,38 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(started).toMatchObject({ result: 'ok: Tasks 0/3' })
   })
 }
+
+// A plugin name of its own starts with `savvy-`, so only the agent's name past the
+// `<plugin>:` prefix tells a worker of the flow from any other agent beside it.
+test('spawn: a plugin-mate that is not a savvy worker is left to itself', async ($, on) => {
+  mock.clock(on)
+  const opened: string[] = []
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  const prompts: string[] = []
+  on('agent.spawn', (_$, e) => {
+    prompts.push(e.prompt)
+    return { model: 'claude-opus-5', agentId: `a${prompts.length}` }
+  })
+  const spawn = (subagentType: string) =>
+    $.agent.spawn({
+      tool_use_id: `t${prompts.length + 1}`,
+      prompt: 'p',
+      description: subagentType,
+      subagentType,
+      provider: 'engine',
+      parentModel: 'claude-opus-5',
+      background: false,
+      fork: false,
+    } as never)
+
+  await spawn('savvy-flow:general-purpose')
+  expect(opened).toEqual([])
+  expect(prompts).toEqual(['p'])
+
+  await spawn('savvy-flow:savvy-careful')
+  expect(prompts[1]).toContain(STEP)
+  expect(opened).toEqual(['savvy-agents'])
+})
