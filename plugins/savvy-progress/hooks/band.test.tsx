@@ -31,3 +31,13 @@ test('desktop: the row is still one Svg', async ($, on) => {
   await session($, on)
   expect(await band($, 'desktop')).toEqual({ svg: 1, title: 0, label: 0 })
 })
+
+test('desktop: the Svg shrinks to leave room for the count and the dismiss', async ($, on) => {
+  await session($, on)
+  const ui = await $.ui.mount({ plugin: 'savvy-progress', surface: 'desktop', ...BAND })
+  const [svg] = await ui.findAll({ type: 'Svg' })
+  const [slot] = await ui.findAll({ type: 'Box', props: { flexShrink: 1, minWidth: 0 } })
+  await ui.unmount()
+  expect(svg.props.width).toBe(undefined)
+  expect(slot).toBeDefined()
+})
