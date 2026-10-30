@@ -1233,12 +1233,16 @@ export const register: Register = (on, options) => {
     if (e.surface !== 'terminal' && 'Svg' in ui) {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
-      // and their gaps. No floor above the slot: a row wider than it would wrap.
+      // and their gaps. The guess runs wider than the slot at some widths, so the
+      // Svg takes no width of its own: its box shrinks to what the count and the
+      // dismiss leave, and the markup scales down by its viewBox.
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} />
+            </Box>
             {crewButton}
             {dismiss}
           </Box>
