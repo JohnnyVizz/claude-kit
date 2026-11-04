@@ -19,7 +19,7 @@ const STEP_TOOL = 'mcp__savvy-progress__step'
 // skip it even with the tool listed; the same request in the brief is followed.
 const STEP_BRIEF = `
 
-Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar.`
+Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. When the task is done, make one last call right before your final report with \`done\` equal to \`total\`; if you stop blocked or partially done, leave \`done\` where it is. It only draws a progress bar.`
 const PANE = 'savvy-agents'
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
 const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light']
@@ -831,7 +831,8 @@ export const register: Register = (on, options) => {
       description:
         'For savvy-flow workers: report progress on your own task to the agents panel. ' +
         'Right after reading the brief, call it with `total` (your plan in 3-8 steps) and `done: 0`; ' +
-        'call it again as each step finishes. Cheap and silent: it only draws a bar.',
+        'call it again as each step finishes, and once more right before your final report with `done` equal to `total` when the task is done. ' +
+        'Cheap and silent: it only draws a bar.',
       inputSchema: {
         type: 'object',
         properties: {
