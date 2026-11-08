@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, AgentStatus, Flow, Panel, Phase, PlannedTask } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -14,6 +14,11 @@ const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
+// A worker the engine cannot see (another CLI, a background script), reported by
+// the main session. Its runs carry this type and have no tokens, context or cost.
+const EXTERNAL_TOOL = 'mcp__savvy-progress__external'
+const EXTERNAL = 'external'
+const EXTERNAL_STATUS: readonly AgentStatus[] = ['running', 'done', 'failed']
 // Added to the end of each savvy worker's brief. Their system prompt words step
 // reporting as a condition ("if the step tool appears among your tools") and they
 // skip it even with the tool listed; the same request in the brief is followed.
@@ -22,12 +27,17 @@ const STEP_BRIEF = `
 Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar.`
 const PANE = 'savvy-agents'
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
-const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light']
+// `external` plans a task for a worker outside Claude Code, reported with the `external` tool.
+const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light', EXTERNAL]
 // The tools' schemas are advice to the model, not a check: what a call may ask
 // the band and the panel to draw is bounded here.
 const MAX_TASKS = 200
 const MAX_AFTER = 20
 const MAX_TITLE = 120
+const MAX_ID = 64
+const MAX_MODEL = 40
+const MAX_NOTE = 80
+const MAX_STEPS = 1000
 const ACCENT = '#8f8cf4'
 const DONE = '#5fbf8f'
 
@@ -38,6 +48,16 @@ type ProgressInput = {
   phase?: Phase
   finished?: boolean
   tasks?: { title?: string; tier?: string; after?: number[] }[]
+}
+
+type ExternalInput = {
+  id?: string
+  description?: string
+  model?: string
+  status?: AgentStatus
+  done?: number
+  total?: number
+  note?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +95,7 @@ const STRINGS = {
     review: 'Review',
     busy: 'running',
     ctx: 'ctx',
-    tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
+    tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', external: 'external', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
   ru: {
@@ -106,7 +126,7 @@ const STRINGS = {
     review: 'Ревью',
     busy: 'в работе',
     ctx: 'ctx',
-    tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
+    tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', external: 'внешний', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
   he: {
@@ -137,7 +157,7 @@ const STRINGS = {
     review: 'בדיקה',
     busy: 'בעבודה',
     ctx: 'הקשר',
-    tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
+    tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', external: 'חיצוני', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
   },
 } as const
@@ -361,6 +381,7 @@ const TIER_COLOR: Record<string, string> = {
   careful: '#BA7517',
   medium: '#378ADD',
   light: '#1D9E75',
+  external: '#5E7A96',
   other: '#888780',
 }
 
@@ -444,6 +465,10 @@ const tierOf = (type: string): string => {
   const t = bare.replace(/^savvy-/, '').toLowerCase()
   return Object.hasOwn(TIER_COLOR, t) && bare.startsWith('savvy-') ? t : 'other'
 }
+
+// A run's look: its savvy tier, or `external` for a worker reported through the `external` tool.
+const isExternal = (a: AgentRun): boolean => a.type === EXTERNAL
+const kindOf = (type: string): string => (type === EXTERNAL ? EXTERNAL : tierOf(type))
 
 const modelName = (id: string): string => {
   const m = /(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/i.exec(id)
@@ -560,6 +585,7 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
+.c-external.run .bd{animation:none}.c-external.run .cur{animation:blink 1s steps(1) infinite}
 @media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
 </style>`
 
@@ -607,10 +633,18 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
   },
+  // External: not a Claude subagent, so no crab: a terminal window whose cursor blinks while it runs.
+  external: (f, t) => {
+    f(3, 5, 24, 19, '#4A515C'); f(4, 8, 22, 15, '#1F2329')
+    f(5, 6, 1, 1, '#E5534B'); f(7, 6, 1, 1, '#E3B341'); f(9, 6, 1, 1, '#57AB5A')
+    f(6, 11, 1, 1, t); f(7, 12, 1, 1, t); f(6, 13, 1, 1, t)
+    f(9, 13, 3, 1, t, 'cur')
+    f(6, 16, 12, 1, '#6B7480'); f(6, 18, 8, 1, '#6B7480'); f(6, 20, 10, 1, '#6B7480')
+  },
   other: f => crabBody(f),
 }
 
-const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
+const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : kindOf(type))
 
 const CRAB_SCALE = 1.1
 
@@ -695,16 +729,20 @@ const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round(
 
 const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const s = tr()
-  const tier = tierOf(a.type)
+  const tier = kindOf(a.type)
   const color = colorOf(tier)
   const ctx = ctxOf(a)
   const textW = W - 42 - 22
-  const meta = [runModel(a)]
+  // An external worker's model is shown as the caller named it.
+  const meta = [isExternal(a) ? a.model : runModel(a)].filter(Boolean)
   if (a.round > 1) meta.push(`${s.round} ${a.round}`)
   if (a.status === 'failed') meta.push(s.failed)
   const barW = textW
   const progress = progressOf(a)
-  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+  // The engine sees an external worker's time, not its tokens.
+  const stats = isExternal(a)
+    ? fmtTime(elapsed(a, at))
+    : `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
   const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
@@ -742,8 +780,8 @@ ${statusMark(mx(W, W - 8), 16, 'planned', color)}
 
 const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>): string => {
   const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
+    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(kindOf(a.type)), s: 'running', dim: false })),
+    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(kindOf(a.type)), s: a.status, dim: false })),
     ...planned.map(p => ({ k: p.tier in TIER_COLOR ? p.tier : 'other', c: colorOf(p.tier), s: 'planned', dim: true })),
   ]
   const fit = Math.max(1, Math.floor((W - 150) / 36))
@@ -844,6 +882,27 @@ export const register: Register = (on, options) => {
       // In every agent's tool list, not behind ToolSearch: workers do not go looking for it.
       isDeferred: false,
     })
+    await $.tool.register({
+      name: 'external',
+      description:
+        "Show a worker that runs outside Claude Code's subagents (another agent CLI, a background script) in the agents panel. " +
+        'For the main session only: call it with status "running" when you launch the worker, again with done/total/note as it reports, ' +
+        'and with "done" or "failed" when it ends. Use the same id for every call about one run; a settled id reported running again is a new round, and done or failed again is ignored. ' +
+        'For a planned task, description must equal its title in `progress` tasks (tier "external" suits it). The row shows status, steps and time, not tokens or cost.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Your own name for this run, stable across its calls, e.g. "gemini-review".' },
+          description: { type: 'string', description: 'A few words; for a planned task, its title verbatim. Needed on the first call.' },
+          model: { type: 'string', description: 'What runs it, as it should read, e.g. "Gemini 3 Flash · agy".' },
+          status: { type: 'string', enum: [...EXTERNAL_STATUS] },
+          done: { type: 'integer', minimum: 0, description: 'Steps finished so far, if the worker reports steps.' },
+          total: { type: 'integer', minimum: 1, description: 'Steps planned.' },
+          note: { type: 'string', description: 'The step in progress, a few words.' },
+        },
+        required: ['id', 'status'],
+      },
+    })
     await $.command.register({
       name: 'agents-info',
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
@@ -904,6 +963,82 @@ export const register: Register = (on, options) => {
       }),
     )
     return { result: matched ? 'ok' : `ignored: no panel row for agent ${agentId}` }
+  })
+
+  // A worker outside Claude Code: the main session reports it, as it reports the flow.
+  on('tool.call', { tool: EXTERNAL_TOOL }, async ($, e) => {
+    if (e.agentId) return { result: 'ignored: only the main session reports external workers' }
+    const input = e as unknown as ExternalInput
+    const key = clip(String(input.id ?? '').trim(), MAX_ID)
+    if (!key) return { result: 'ignored: an id is required' }
+    const status = input.status
+    if (!status || !EXTERNAL_STATUS.includes(status)) return { result: 'ignored: status must be running, done or failed' }
+    const count = (v: unknown, max: number): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(0, Math.round(v))) : undefined
+
+    const at = await $.clock.now()
+    let shown: AgentRun | undefined
+    let settled: AgentRun | undefined
+    let isNew = false
+    await update($, agents, list => {
+      const prev = [...list].reverse().find(a => a.externalId === key)
+      // A settled run stays as it ended: a second done or failed changes nothing,
+      // and running again is a new round, as a re-dispatched subagent is.
+      if (prev && prev.status !== 'running' && status !== 'running') {
+        settled = prev
+        return list
+      }
+      isNew = !prev || (status === 'running' && prev.status !== 'running')
+      const description = clip(String(input.description ?? '').trim(), MAX_TITLE) || prev?.description || key
+      // Past the highest number this id has used: earlier rounds may have been trimmed from the list.
+      const seq = Math.max(0, ...list.filter(a => a.externalId === key).map(a => Number(a.id.split(':').pop()) || 0)) + 1
+      const base: AgentRun =
+        !isNew && prev
+          ? prev
+          : {
+              id: `${EXTERNAL}:${key}:${seq}`,
+              externalId: key,
+              type: EXTERNAL,
+              description,
+              model: prev?.model ?? '',
+              status: 'running',
+              startedAt: at,
+              contextTokens: 0,
+              contextMax: 0,
+              tokens: 0,
+              costUsd: 0,
+              steps: 0,
+              round: 1 + list.filter(a => description && norm(a.description) === norm(description)).length,
+            }
+      // A total of 0 is no plan at all: keep the one before.
+      const total = count(input.total, MAX_STEPS) || base.stepTotal
+      const done = count(input.done, MAX_STEPS) ?? base.stepDone
+      const run: AgentRun = {
+        ...base,
+        description,
+        model: clip(String(input.model ?? '').trim(), MAX_MODEL) || base.model,
+        status,
+        endedAt: status === 'running' ? undefined : at,
+        stepTotal: total,
+        stepDone: total && done !== undefined ? Math.min(total, done) : done,
+        stepNote: clip(String(input.note ?? '').trim(), MAX_NOTE) || undefined,
+      }
+      shown = run
+      // An update keeps its row in place; only a new run joins the end.
+      return isNew ? [...list, run].slice(-200) : list.map(a => (a.id === run.id ? run : a))
+    })
+    const done = settled as AgentRun | undefined
+    if (done) return { result: `ignored: ${done.description} already ${done.status}; report running to start a new round` }
+    await update($, now, () => at)
+
+    const f = await read($, flow)
+    if (isNew && f && !f.isFinished) await autoOpen($, f.title)
+    else if (isNew && options.autoOpen === 'any') await autoOpen($, 'any-agent')
+    const run = shown as AgentRun | undefined
+    if (!run) return { result: 'ignored: nothing to show' }
+    // Say so when the run cannot take a planned row's place, so the caller can fix the title.
+    const isUnplanned = f && !f.isFinished && f.tasks.length > 0 && !f.tasks.some(t => norm(t.title) === norm(run.description))
+    return { result: `ok: ${run.description} ${run.status}${isUnplanned ? ' (no planned task has this title)' : ''}` }
   })
 
   // Safety net: worker launches move the faint layer even if the orchestrator forgets to report.
@@ -1117,11 +1252,11 @@ export const register: Register = (on, options) => {
     const cols = Math.max(24, e.props.bodyColumns || 40)
     const barW = Math.max(6, Math.min(20, cols - 34))
     const row = (a: AgentRun) => {
-      const tier = tierOf(a.type)
+      const tier = kindOf(a.type)
       const color = colorOf(tier)
       const ctx = ctxOf(a)
       const progress = progressOf(a)
-      const model = runModel(a)
+      const model = isExternal(a) ? a.model : runModel(a)
       const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
       return (
         <Box key={a.id} flexDirection="column" marginBottom={1}>
@@ -1134,7 +1269,8 @@ export const register: Register = (on, options) => {
           </Box>
           <Text dimColor wrap="truncate-end">
             {'  '}
-            {tier === 'other' ? a.type : tierWord(tier)} · {model}
+            {tier === 'other' ? a.type : tierWord(tier)}
+            {model ? ` · ${model}` : ''}
             {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
           </Text>
           <Text wrap="truncate-end">
@@ -1142,7 +1278,9 @@ export const register: Register = (on, options) => {
             {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {steps}
+              {isExternal(a) ? '' : `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)} ≈${fmtCost(a.costUsd)} `}
+              {fmtTime(elapsed(a, at))}
             </Text>
           </Text>
         </Box>
@@ -1163,7 +1301,7 @@ export const register: Register = (on, options) => {
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
-              <Text key={a.id} color={colorOf(tierOf(a.type))}>
+              <Text key={a.id} color={colorOf(kindOf(a.type))}>
                 {STATUS_GLYPH[a.status]}{' '}
               </Text>
             ))}
@@ -1190,7 +1328,7 @@ export const register: Register = (on, options) => {
                   </Text>
                   <Text dimColor wrap="truncate-end">
                     {'  '}
-                    {tierWord(tier)} · {tierModel(tier)}
+                    {[tierWord(tier), tierModel(tier)].filter(Boolean).join(' · ')}
                     {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
                   </Text>
                 </Box>

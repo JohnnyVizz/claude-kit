@@ -38,6 +38,8 @@ export type AgentRun = {
   stepDone?: number
   stepTotal?: number
   stepNote?: string
+  /** The caller's id for a run reported through the `external` tool: a worker outside Claude Code's subagents. */
+  externalId?: string
 }
 
 export type Panel = {
