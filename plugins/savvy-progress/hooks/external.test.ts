@@ -154,6 +154,19 @@ test('an update keeps its row in place among other running workers', async ($, o
   expect(after.indexOf('Worker B') < after.indexOf('Worker A')).toBe(before.indexOf('Worker B') < before.indexOf('Worker A'))
 })
 
+test('the last note stays through updates without one and on the finished row; an empty note clears it', async ($, on) => {
+  await flow($, on)
+  await external($, { id: 'g', description: REVIEW, status: 'running', done: 1, total: 3, note: 'reading the diff' })
+  await external($, { id: 'g', status: 'running', done: 2 })
+  expect(await drawn($, 'terminal')).toContain('2/3 reading the diff')
+  await external($, { id: 'g', status: 'done', done: 3 })
+  for (const surface of ['terminal', 'desktop'] as const) expect(await drawn($, surface)).toContain('reading the diff')
+
+  await external($, { id: 'h', description: 'Other review', status: 'running', done: 1, total: 2, note: 'starting' })
+  await external($, { id: 'h', status: 'running', note: '' })
+  expect(await drawn($, 'terminal')).not.toContain('starting')
+})
+
 test('a total of 0 keeps the earlier plan', async ($, on) => {
   await flow($, on)
   await external($, { id: 'g', description: REVIEW, status: 'running', done: 1, total: 3 })

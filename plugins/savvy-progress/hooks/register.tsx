@@ -1021,7 +1021,8 @@ export const register: Register = (on, options) => {
         endedAt: status === 'running' ? undefined : at,
         stepTotal: total,
         stepDone: total && done !== undefined ? Math.min(total, done) : done,
-        stepNote: clip(String(input.note ?? '').trim(), MAX_NOTE) || undefined,
+        // A call without a note keeps the last one, so a finished row still says how it ended; an empty note clears it.
+        stepNote: input.note == null ? base.stepNote : clip(String(input.note).trim(), MAX_NOTE) || undefined,
       }
       shown = run
       // An update keeps its row in place; only a new run joins the end.
