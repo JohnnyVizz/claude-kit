@@ -236,13 +236,22 @@ const noise = (x: number, y: number): number => {
 // The whole row is one SVG: the desktop wraps sibling elements onto new lines,
 // so title, bar, percent and the crab live in one drawing; only the count and
 // the dismiss are Buttons beside it.
-const H = 22
-const BAR_H = 16
-const CRAB_W = 26
+// Arcade look: a framed, segmented HP bar (one block per task when there are
+// few), coins in the blocks still to win, a goal flag at the end, and Clawd
+// running along the top of the bar at the fill's head.
+const H = 40
+const BAR_H = 14
+// The bar's top edge: the crab's feet stand on it.
+const BAR_Y = 24
 // The crab's drawing grid is 30 units wide, props included.
 const CRAB_BOX = 30
-const CELL = 3
+const BAND_CRAB = 0.85
 const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif"
+const PIX = "'Press Start 2P','Silkscreen','Cascadia Mono',Consolas,ui-monospace,monospace"
+const COIN = '#F5C542'
+const COIN_HI = '#FBE08A'
+// Up to this many tasks, each task is one block of the bar.
+const MAX_BLOCKS = 24
 
 const xml = (s: string): string =>
   s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
@@ -271,85 +280,126 @@ const fitText = (s: string, size: number, maxW: number): string => {
   return out + '…'
 }
 
+// A rectangle with its four corner pixels cut off, the way old consoles drew boxes.
+const notched = (x: number, y: number, w: number, h: number, cls: string): string =>
+  `<path class="${cls}" d="M${x + 1} ${y}h${w - 2}v1h1v${h - 2}h-1v1h${-(w - 2)}v-1h-1v${-(h - 2)}h1z"/>`
+
+// A 5×5 pixel heart, drawn in 2px cells.
+const HEART = ['.x.x.', 'xxxxx', 'xxxxx', '.xxx.', '..x..']
+const heart = (x: number, y: number, color: string): string =>
+  HEART.flatMap((row, r) => [...row].map((ch, c) => (ch === 'x' ? `<rect x="${x + c * 2}" y="${y + r * 2}" width="2" height="2" fill="${color}"/>` : ''))).join('')
+
 const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
-  // The title takes what it needs, up to 40% of the row; the bar takes the rest.
-  const title = fitText(f.title, 13, Math.max(60, W * 0.4))
-  const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
-  const BAR_W = Math.max(60, W - BAR_X - 46 - CRAB_W)
-  const color = f.isFinished ? DONE : ACCENT
-  const y0 = (H - BAR_H) / 2
-  const fillW = Math.round(BAR_W * ratio(f))
-  const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running)) / f.total) : 0
-  const dots: string[] = []
   // Positions are worked out left to right; right to left mirrors each box
   // inside the bar (`bx`) and across the row (`rx`). Text is never mirrored.
   const rtl = isRtl()
-  const bx = (x: number, w: number): number => (rtl ? BAR_W - x - w : x)
   const rx = (x: number, w: number): number => (rtl ? W - x - w : x)
 
-  // Dithered fill: sparse at the start, dense toward the head.
-  const cols = Math.floor(fillW / CELL)
-  const rows = Math.floor(BAR_H / CELL)
-  for (let c = 0; c < cols; c++) {
-    const density = 0.35 + 0.6 * Math.pow(c / Math.max(1, cols), 1.2)
-    for (let r = 0; r < rows; r++) {
-      if (noise(c, r) < density) dots.push(`<rect class="t${Math.floor(noise(r, c) * 4)}" x="${bx(c * CELL + 1, 2)}" y="${r * CELL + 1}" width="2" height="2"/>`)
-    }
-  }
-  // Handed to workers, not yet accepted: a faint second layer.
-  const faint: string[] = []
-  for (let c = cols; c < Math.floor(runW / CELL); c++) {
-    for (let r = 0; r < rows; r++) {
-      if (noise(c + 7, r + 3) < 0.2) faint.push(`<rect class="t${Math.floor(noise(r + 5, c) * 4)}" x="${bx(c * CELL + 1, 1.7)}" y="${r * CELL + 1}" width="1.7" height="1.7"/>`)
-    }
-  }
-
-  const ticks: string[] = []
-  for (let i = 1; i < f.total; i++) {
-    const x = Math.round((BAR_W * i) / f.total)
-    if (x > fillW + 4) ticks.push(`<rect x="${bx(x, 1.5)}" y="${BAR_H / 2 - 4}" width="1.5" height="8" rx="0.75"/>`)
-  }
-
-  const text = label(f)
-  const pillW = Math.round(18 + text.length * 6.6)
-  const pillX = bx(Math.max(0, Math.min(BAR_W - pillW, fillW - pillW)), pillW)
+  // Pixel type runs wide: the title takes up to a third of the row.
+  const title = fitText(f.title.toUpperCase(), 11, Math.max(60, W * 0.33))
+  const hud = label(f).toUpperCase()
   const percent = `${Math.round(ratio(f) * 100)}%`
+  const slotW = Math.round(Math.max(44, textWidth(hud, 9) + 6, textWidth(percent, 11) + 6))
+  const FLAG_W = 12
+  const BAR_X = Math.round(16 + textWidth(title, 11) + 12)
+  const BAR_W = Math.max(80, W - BAR_X - FLAG_W - slotW - 6)
+  const bx = (x: number, w: number): number => (rtl ? BAR_W - x - w : x)
+  const color = f.isFinished ? DONE : ACCENT
+
+  // Blocks: one per task when there are few, else even 8px chunks.
+  const inner = BAR_W - 4
+  const gap = 2
+  const perTask = f.total > 0 && f.total <= MAX_BLOCKS
+  const segs = perTask ? f.total : Math.max(4, Math.floor(inner / 8))
+  const segW = (inner - gap * (segs - 1)) / segs
+  const filled = Math.round(segs * ratio(f))
+  // Handed to workers, not yet accepted: blocks that blink.
+  const runTo = f.total ? Math.max(filled, Math.round((segs * Math.min(f.total, f.done + f.running)) / f.total)) : filled
+  const blocks: string[] = []
+  for (let i = 0; i < segs; i++) {
+    const x = bx(2 + i * (segW + gap), segW)
+    const w = segW.toFixed(2)
+    if (i < filled) {
+      const head = i === filled - 1 && !f.isFinished ? ' class="hd"' : ''
+      blocks.push(
+        `<g${head}><rect x="${x}" y="2" width="${w}" height="${BAR_H - 4}" fill="${color}"/>` +
+          `<rect x="${x}" y="2" width="${w}" height="2" fill="#fff" opacity=".4"/>` +
+          `<rect x="${x}" y="${BAR_H - 4}" width="${w}" height="2" fill="#000" opacity=".22"/></g>`,
+      )
+    } else if (i < runTo) {
+      blocks.push(`<rect class="bk" x="${x}" y="2" width="${w}" height="${BAR_H - 4}" fill="${color}" opacity=".45"/>`)
+    } else {
+      blocks.push(`<rect class="e" x="${x}" y="2" width="${w}" height="${BAR_H - 4}"/>`)
+      // A coin waits in each task still to win.
+      if (perTask && segW >= 6) {
+        const cx = x + segW / 2 - 2
+        blocks.push(`<g class="cn"><rect x="${cx.toFixed(2)}" y="3" width="4" height="6" fill="${COIN}"/><rect x="${(cx + 1).toFixed(2)}" y="4" width="1" height="3" fill="${COIN_HI}"/></g>`)
+      }
+    }
+  }
+
+  // Clawd stands on the bar at the fill's head; at the goal once finished.
+  const crabW = CRAB_BOX * BAND_CRAB
+  const headX = filled ? 2 + filled * (segW + gap) - gap : 0
+  const crabX = Math.max(0, Math.min(BAR_W - crabW, headX - crabW / 2))
+  const crabRowX = BAR_X + bx(crabX, crabW)
+  // Legs end on grid row 26: lift the crab so its feet touch the bar's top.
+  const crabY = BAR_Y - 26 * BAND_CRAB
+  const sparkles = f.isFinished
+    ? [0, 1, 2]
+        .map(i => {
+          const sx = crabRowX + (i === 0 ? -4 : i === 1 ? crabW + 2 : crabW / 2 + (noise(i, 3) - 0.5) * 6)
+          const sy = crabY + (i === 2 ? 2 : 8 + i * 4)
+          return `<g class="sp" style="animation-delay:${-i * 0.15}s" fill="${COIN}"><rect x="${sx}" y="${sy + 1}" width="3" height="1"/><rect x="${sx + 1}" y="${sy}" width="1" height="3"/></g>`
+        })
+        .join('')
+    : ''
+
+  // The goal flag stands just past the bar's end.
+  const flagX = rx(BAR_X + BAR_W + 4, 7)
+  const flagY = BAR_Y - 12
+  const flag = `<rect class="t" x="${rtl ? flagX + 6 : flagX}" y="${flagY}" width="1" height="${BAR_H + 12}"/>
+<g class="fl"${rtl ? ' style="transform-origin:100% 50%"' : ''}>${['wkw', 'kwk']
+    .flatMap((row, r) => [...row].map((ch, c) => `<rect x="${(rtl ? flagX : flagX + 1) + c * 2}" y="${flagY + r * 2}" width="2" height="2" fill="${ch === 'w' ? '#F8F6F1' : f.isFinished ? DONE : INK}"/>`))
+    .join('')}</g>`
+
   // `direction="rtl"` puts Hebrew words and numbers in reading order; `start` is then the right edge.
+  const midY = BAR_Y + BAR_H / 2 + 4
   const titleAt = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
-  const percentAt = rtl ? `x="${CRAB_W + 6}" y="${H / 2 + 4.5}"` : `x="${W - CRAB_W - 6}" y="${H / 2 + 4.5}" text-anchor="end"`
-  const crabW = CRAB_BOX * 0.8
+  const slotAnchor = rtl ? '' : ' text-anchor="end"'
+  const slotEdge = rtl ? 0 : W
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>
-.t{fill:#1f1f1f}.m{fill:#8a8a8a}.k{fill:#e4e4e2}.tk{fill:#b4b4b0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}.k{fill:#2c2c2c}.tk{fill:#5a5a5a}}
-/* Pixels twinkle in four out-of-phase groups; a finished bar settles to a slow glow. */
-.t0,.t1,.t2,.t3{animation:tw ${f.isFinished ? 3.2 : 2.2}s ease-in-out infinite}
-.t1{animation-duration:${f.isFinished ? 3.8 : 2.8}s;animation-delay:-.7s}.t2{animation-duration:${f.isFinished ? 4.4 : 1.9}s;animation-delay:-1.3s}.t3{animation-duration:${f.isFinished ? 3.5 : 3.3}s;animation-delay:-.4s}
-@keyframes tw{0%,100%{opacity:1}50%{opacity:${f.isFinished ? 0.8 : 0.3}}}
-@media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
+.t{fill:#1f1f1f}.m{fill:#77756f}.fr{fill:#1f1e1d}.tr{fill:#34332f}.e{fill:#48463f}
+@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#a8a6a0}.fr{fill:#8a8882}.tr{fill:#121211}.e{fill:#2a2a28}}
+.hd,.bk,.sp{animation:bl .5s steps(1) infinite}.bk{animation-duration:1s}.sp{animation-duration:.4s}
+@keyframes bl{50%{opacity:.4}}
+.cn{transform-box:fill-box;transform-origin:50% 50%;animation:spin 1s steps(1) infinite}
+@keyframes spin{25%,75%{transform:scaleX(.5)}50%{transform:scaleX(.2)}}
+.fl{transform-box:fill-box;transform-origin:0 50%;animation:fw .5s steps(1) infinite}
+@keyframes fw{50%{transform:skewY(-15deg)}}
+@media (prefers-reduced-motion: reduce){.hd,.bk,.sp,.cn,.fl{animation:none}}
 </style>
-<defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
-<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
-<g transform="translate(${rx(BAR_X, BAR_W)},${y0})">
-<rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
-<g clip-path="url(#c)">
-<g fill="${color}">${dots.join('')}</g>
-<g fill="${color}" opacity="0.45">${faint.join('')}</g>
-<g class="tk">${ticks.join('')}</g>
+${heart(rtl ? W - 10 : 0, BAR_Y + 1, CLAY)}
+<text class="t" ${titleAt} y="${midY}" font-family="${PIX}" font-size="11" font-weight="700" letter-spacing=".5">${xml(title)}</text>
+<g transform="translate(${rx(BAR_X, BAR_W)},${BAR_Y})">
+${notched(0, 0, BAR_W, BAR_H, 'fr')}
+${notched(1, 1, BAR_W - 2, BAR_H - 2, 'tr')}
+${blocks.join('')}
 </g>
-<rect x="${pillX}" width="${pillW}" height="${BAR_H}" rx="${BAR_H / 2}" fill="${color}"/>
-<text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle"${rtl ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
-</g>
-<text class="m" ${percentAt} font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, rtl)}
+${flag}
+<text class="m" x="${rtl ? 0 : slotEdge}"${slotAnchor} y="${BAR_Y - 5}" font-family="${PIX}" font-size="9" font-weight="700"${rtl ? ' direction="rtl" text-anchor="end"' : ''}>${xml(hud)}</text>
+<text class="t" x="${rtl ? 0 : slotEdge}"${slotAnchor} y="${midY}" font-family="${PIX}" font-size="11" font-weight="700" font-variant-numeric="tabular-nums">${percent}</text>
+${CRAB_CSS}${crab(crabRowX, crabY, 'other', false, isWorking && !f.isFinished, BAND_CRAB, rtl)}
+${sparkles}
 </svg>`
 }
 
+// Terminal: chunky blocks, like a health bar.
 const barText = (f: Flow, width: number): string => {
   const filled = Math.round(width * ratio(f))
-  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
+  return '▰'.repeat(filled) + '▱'.repeat(Math.max(0, width - filled))
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +758,17 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
-  const fillW = Math.round(barW * (progress ?? ctx / 100))
+  // Arcade blocks: one per reported step when there are few, else 9px chunks.
+  const segs = a.stepTotal && a.stepTotal <= 20 && progress !== null ? a.stepTotal : Math.max(4, Math.min(40, Math.floor(barW / 9)))
+  const segW = (barW - 2 * (segs - 1)) / segs
+  const lit = Math.round(segs * (progress ?? ctx / 100))
+  const blocks = Array.from({ length: segs }, (_, i) => {
+    const x = mx(W, 42 + i * (segW + 2), segW).toFixed(2)
+    const w = segW.toFixed(2)
+    if (i >= lit) return `<rect class="k" x="${x}" y="54" width="${w}" height="6"/>`
+    const fill = progress === null ? ' class="m"' : ` fill="${color}"`
+    return `<rect${fill} x="${x}" y="54" width="${w}" height="6"/><rect x="${x}" y="54" width="${w}" height="2" fill="#fff" opacity=".35"/>`
+  }).join('')
   return svg(
     W,
     66,
@@ -717,7 +777,7 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
 <text class="s" ${endText(W, 42 + barW, 49, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${stats}</text>
-<rect class="k" x="${mx(W, 42, barW)}" y="55" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, 42, fillW)}" y="55" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
+${blocks}
 ${statusMark(mx(W, W - 8), 16, a.status, color)}
 <line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
   )
@@ -765,7 +825,7 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnTy
 
 const ctxBar = (pct: number, width: number): string => {
   const filled = Math.round((width * pct) / 100)
-  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
+  return '▰'.repeat(filled) + '▱'.repeat(Math.max(0, width - filled))
 }
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
