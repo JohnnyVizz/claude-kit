@@ -1062,7 +1062,7 @@ export const register: Register = (on, options) => {
     const isEmpty = list.length === 0 && planned.length === 0
     const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
 
-    if (e.surface === 'desktop' && 'Svg' in ui) {
+    if (e.surface !== 'terminal' && 'Svg' in ui) {
       const { Svg } = ui
       const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
       const section = (key: string, text: string) => (
