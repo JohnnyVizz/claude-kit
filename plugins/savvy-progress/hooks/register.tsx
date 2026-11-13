@@ -42,9 +42,9 @@ type ProgressInput = {
 
 // ---------------------------------------------------------------------------
 // Language: the `language` option, else Claude Code's `language` setting, else the
-// process locale; English when nothing says Hebrew or Russian.
+// process locale; English when nothing says Hebrew, Ukrainian or Russian.
 
-type Lang = 'en' | 'ru' | 'he'
+type Lang = 'en' | 'ru' | 'uk' | 'he'
 
 const STRINGS = {
   en: {
@@ -109,6 +109,37 @@ const STRINGS = {
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
+  uk: {
+    pane: 'Агенти',
+    cost: 'Вартість',
+    tokens: 'Токени',
+    time: 'Час',
+    collapse: 'Згорнути',
+    expand: 'Розгорнути',
+    running: 'Працюють',
+    finished: 'Завершені',
+    planned: 'Заплановані',
+    empty: 'Субагентів поки немає.',
+    round: 'раунд',
+    failed: 'помилка',
+    after: 'після',
+    tokensWord: 'токенів',
+    agentsCount: 'агентів',
+    isRunning: 'працює',
+    isFinished: 'завершено',
+    isPlanned: 'заплановано',
+    opened: 'Панель агентів відкрито.',
+    closed: 'Панель агентів закрито.',
+    done: 'Готово',
+    plan: 'План',
+    design: 'Дизайн',
+    tasks: 'Задачі',
+    review: 'Рев’ю',
+    busy: 'у роботі',
+    ctx: 'ctx',
+    tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
+    effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  },
   he: {
     pane: 'סוכנים',
     cost: 'עלות',
@@ -155,10 +186,11 @@ const effortWord = (effort: string): string => (tr().effort as Record<string, st
 
 const isRussian = (v: unknown): boolean => typeof v === 'string' && /^(ru|russian|рус)/i.test(v.trim())
 const isHebrew = (v: unknown): boolean => typeof v === 'string' && /^(he|iw|hebrew|עברית)/i.test(v.trim())
-const langOf = (v: unknown): Lang => (isHebrew(v) ? 'he' : isRussian(v) ? 'ru' : 'en')
+const isUkrainian = (v: unknown): boolean => typeof v === 'string' && /^(uk|ukrainian|укр)/i.test(v.trim())
+const langOf = (v: unknown): Lang => (isHebrew(v) ? 'he' : isUkrainian(v) ? 'uk' : isRussian(v) ? 'ru' : 'en')
 
 async function detectLang($: EngineInterface, option: unknown): Promise<Lang> {
-  if (option === 'en' || option === 'ru' || option === 'he') return option
+  if (option === 'en' || option === 'ru' || option === 'uk' || option === 'he') return option
   try {
     const settings = (await $.settings.read()) as Record<string, unknown>
     if (typeof settings.language === 'string' && settings.language.trim()) return langOf(settings.language)
