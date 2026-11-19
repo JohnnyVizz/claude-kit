@@ -1236,15 +1236,16 @@ export const register: Register = (on, options) => {
       // wider than 8 px a column), so the drawing is a ceiling, not a size: it
       // sits in a shrinking box and, without a width of its own, scales down
       // to what is left once the count and the dismiss, which never shrink,
-      // have their room. A fixed width here pushed the dismiss out of view.
+      // have their room; the box does not grow, so the buttons follow the bar
+      // instead of drifting to the edge. A fixed width pushed the dismiss out of view.
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} flexWrap="nowrap">
-            <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
               <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} />
             </Box>
-            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} flexShrink={0}>
+            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} flexShrink={0} paddingRight={1}>
               {crewButton}
               {dismiss}
             </Box>
