@@ -1232,15 +1232,23 @@ export const register: Register = (on, options) => {
     // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
     if (e.surface !== 'terminal' && 'Svg' in ui) {
       const { Svg } = ui
-      // About 8 CSS px per reported column; the rest is the count, the dismiss
-      // and their gaps. No floor above the slot: a row wider than it would wrap.
+      // Columns only estimate the slot's CSS width (the desktop's font may be
+      // wider than 8 px a column), so the drawing is a ceiling, not a size: it
+      // sits in a shrinking box and, without a width of its own, scales down
+      // to what is left once the count and the dismiss, which never shrink,
+      // have their room; the box does not grow, so the buttons follow the bar
+      // instead of drifting to the edge. A fixed width pushed the dismiss out of view.
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
         <Box flexDirection="column">
-          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
-            {crewButton}
-            {dismiss}
+          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} flexWrap="nowrap">
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
+              <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} />
+            </Box>
+            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} flexShrink={0} paddingRight={1}>
+              {crewButton}
+              {dismiss}
+            </Box>
           </Box>
           {below}
         </Box>
