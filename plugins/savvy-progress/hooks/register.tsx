@@ -72,6 +72,7 @@ const STRINGS = {
     plan: 'Plan',
     design: 'Design',
     tasks: 'Tasks',
+    steps: 'Steps',
     review: 'Review',
     busy: 'running',
     ctx: 'ctx',
@@ -103,6 +104,7 @@ const STRINGS = {
     plan: 'План',
     design: 'Дизайн',
     tasks: 'Задачи',
+    steps: 'Шаги',
     review: 'Ревью',
     busy: 'в работе',
     ctx: 'ctx',
@@ -134,6 +136,7 @@ const STRINGS = {
     plan: 'תכנון',
     design: 'עיצוב',
     tasks: 'משימות',
+    steps: 'שלבים',
     review: 'בדיקה',
     busy: 'בעבודה',
     ctx: 'הקשר',
@@ -222,7 +225,9 @@ const label = (f: Flow): string => {
   if (f.phase === 'plan') return s.plan
   if (f.phase === 'design') return s.design
   const count = f.total ? `${f.done}/${f.total}` : `${f.running} ${s.busy}`
-  return `${f.phase === 'review' ? s.review : s.tasks} ${count}`
+  // A plan of worker tasks counts tasks; bare counts (a session tracking its own work) count steps.
+  const unit = f.tasks?.length ? s.tasks : s.steps
+  return `${f.phase === 'review' ? s.review : unit} ${count}`
 }
 
 const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? f.done / f.total : 0)
