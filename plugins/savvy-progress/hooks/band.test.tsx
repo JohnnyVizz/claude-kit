@@ -17,7 +17,7 @@ async function band($: Engine, surface: 'terminal' | 'desktop') {
   const ui = await $.ui.mount({ plugin: 'savvy-progress', surface, ...BAND })
   const svg = await ui.findAll({ type: 'Svg' })
   const title = await ui.findAll({ type: 'Text', text: /^Ship it$/ })
-  const label = await ui.findAll({ type: 'Text', text: /^Tasks 1\/4$/ })
+  const label = await ui.findAll({ type: 'Text', text: /^Steps 1\/4$/ })
   await ui.unmount()
   return { svg: svg.length, title: title.length, label: label.length }
 }

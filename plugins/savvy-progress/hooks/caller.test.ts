@@ -16,16 +16,16 @@ test('caller: a subagent cannot report the flow', async $ => {
   const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: band })
   const row = String((await ui.find({ type: 'Svg' }))?.props.source)
   expect(row).toContain('Ship the thing')
-  expect(row).toContain('Tasks 1/3')
+  expect(row).toContain('Steps 1/3')
   expect(row).not.toContain('Hijacked')
 
   // The main session still can.
-  expect(await $.tool.call({ tool: PROGRESS, done: 2 } as never)).toMatchObject({ result: 'ok: Tasks 2/3' })
+  expect(await $.tool.call({ tool: PROGRESS, done: 2 } as never)).toMatchObject({ result: 'ok: Steps 2/3' })
 })
 
 test('caller: a subagent cannot start a flow either', async $ => {
   const started = await $.tool.call({ tool: PROGRESS, agentId: 'a1', title: 'Hijacked', phase: 'delegate', total: 2 } as never)
   expect(started).toMatchObject({ result: 'ignored: only the main session reports the flow' })
   // The main session's first report starts at its own counts.
-  expect(await $.tool.call({ tool: PROGRESS, title: 'Real flow', phase: 'delegate', total: 4 } as never)).toMatchObject({ result: 'ok: Tasks 0/4' })
+  expect(await $.tool.call({ tool: PROGRESS, title: 'Real flow', phase: 'delegate', total: 4 } as never)).toMatchObject({ result: 'ok: Steps 0/4' })
 })
