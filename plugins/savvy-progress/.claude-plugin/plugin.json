@@ -20,6 +20,17 @@
         "he"
       ]
     },
+    "barPosition": {
+      "type": "string",
+      "title": "Progress bar position",
+      "description": "above: over the prompt; below: in the status line under the prompt (terminal only, other surfaces keep it above); both: in each",
+      "default": "above",
+      "options": [
+        "above",
+        "below",
+        "both"
+      ]
+    },
     "autoOpen": {
       "type": "string",
       "title": "Open the agents panel",
