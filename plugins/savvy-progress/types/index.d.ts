@@ -21,6 +21,18 @@ export type AgentStatus = 'running' | 'done' | 'failed'
 export type AgentRun = {
   id: string
   agentId?: string
+  cli?: 'codex' | 'gemini'
+  parentId?: string
+  logPath?: string
+  outPath?: string
+  logOffset?: number
+  /** Scan position within a line longer than a single read. */
+  logScanOffset?: number
+  logMarker?: 'exec' | 'codex' | 'tokens used'
+  logCarry?: string
+  logHeaderDone?: boolean
+  logPending?: boolean
+  tokensReported?: boolean
   type: string
   description: string
   model: string
@@ -46,6 +58,14 @@ export type Panel = {
   autoOpenedFor: string
 }
 
+export type Live = {
+  isWorking: boolean
+  /** The main loop is running the `codex` CLI right now. */
+  isCodex: boolean
+  cliId?: string
+  doing: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'savvy-progress': {
@@ -53,6 +73,7 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       now: number
+      live: Live
     }
   }
 }

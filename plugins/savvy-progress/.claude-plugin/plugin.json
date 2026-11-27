@@ -1,6 +1,6 @@
 {
   "name": "savvy-progress",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Progress bar above the prompt for /savvy-flow, plus an agents panel (/agents-info): running, finished and planned subagents with model, task progress, context, cost and time.",
   "author": {
     "name": "johnnyvizz",
@@ -23,9 +23,10 @@
     "autoOpen": {
       "type": "string",
       "title": "Open the agents panel",
-      "description": "savvy: when a savvy-flow worker starts or a plan is reported; any: also when any other subagent starts",
-      "default": "savvy",
+      "description": "always: open at session start and whenever any subagent starts; savvy: when a savvy-flow worker starts or a plan is reported; any: also once when any other subagent starts",
+      "default": "always",
       "options": [
+        "always",
         "savvy",
         "any"
       ]

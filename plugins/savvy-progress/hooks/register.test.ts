@@ -1,9 +1,9 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PLUGIN = 'savvy-progress'
 const PROGRESS = 'mcp__savvy-progress__progress'
 
-const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
+const band = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
 const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
 
 const plan = {
@@ -58,6 +58,28 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(drawn).not.toContain('[object')
   })
 
+  // The "Working now" strip: Claude while the main loop runs a tool, Codex while it runs the codex CLI.
+  test(`${surface}: the mascot shows who is working now`, async ($, on) => {
+    mock.env(on, {})
+    mock.clock(on)
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    const seen: string[] = []
+    on('tool.call', async () => {
+      const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: 'savvy-agents', props: pane })
+      const svgs = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.alt))
+      const texts = (await ui.findAll({ type: 'Text' })).map(el => String(el.text ?? ''))
+      seen.push([...svgs, ...texts].join('|'))
+      await ui.unmount()
+      return { result: {} }
+    })
+    await $.tool.call({ tool: 'Bash', command: 'ls', description: 'List files' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'codex exec "fix it"', description: 'Ask Codex to fix' } as never)
+    expect(seen[0]).toContain('Claude')
+    expect(seen[0]).toContain('List files')
+    expect(seen[1]).toContain('Codex')
+    expect(seen[1]).toContain('Ask Codex to fix')
+  })
+
   // The stored title is clipped, so the incoming one is clipped before the two are compared.
   test(`${surface}: a title past the cap is still the same flow`, async ($, on) => {
     on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -73,3 +95,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(started).toMatchObject({ result: 'ok: Tasks 0/3' })
   })
 }
+
+// A savvy-gemini task wears the Gemini sparkle, not the plain crab.
+test('desktop: a gemini task draws the Gemini mascot', async ($, on) => {
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.tool.call({ tool: PROGRESS, title: 'Draft script', phase: 'delegate', tasks: [{ title: 'Write the lines', tier: 'gemini' }] } as never)
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'savvy-agents', props: pane })
+  const drawn = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
+  expect(drawn).toContain('c-gemini')
+  expect(drawn).toContain('#4C8DF6')
+})
