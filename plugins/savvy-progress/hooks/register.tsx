@@ -1202,9 +1202,43 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // `barPosition`: `above` (default) draws the bar over the prompt, `below` in the status line
+  // under it (terminal only: other surfaces keep it above), `both` in each.
+  const position = options.barPosition === 'below' || options.barPosition === 'both' ? options.barPosition : 'above'
+
+  on('ui.render', { component: 'StatusLine' }, async ($, e, next) => {
+    if (position === 'above') return next(e)
+    const f = await read($, flow)
+    const drawn = await next(e)
+    // Room for the status command's own rows plus this one.
+    const used = e.props.text ? e.props.text.split('\n').length : 0
+    if (f === null || e.props.maxRows <= used) return drawn
+    const { Box, Text } = $.ui.resolve(e)
+    const cols = e.props.columns
+    const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
+    const width = Math.max(6, Math.min(40, cols - titleW - 24))
+    const color = f.isFinished ? DONE : ACCENT
+    return (
+      <Box flexDirection="column">
+        {drawn}
+        <Box flexDirection="row" gap={2}>
+          <Box width={titleW} flexShrink={0}>
+            <Text color={color}>● </Text>
+            <Text wrap="truncate-end">{f.title}</Text>
+          </Box>
+          <Text color={color}>{barText(f, width)}</Text>
+          <Text bold>{label(f)}</Text>
+          <Text dimColor>{`${Math.round(ratio(f) * 100)}%`}</Text>
+        </Box>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
     if (f === null || e.props.hasSurvey) return next(e)
+    // `below` moves the bar to the status line, which only the terminal has.
+    if (position === 'below' && e.surface === 'terminal') return next(e)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)

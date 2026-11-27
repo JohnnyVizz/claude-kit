@@ -20,6 +20,8 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 { "pluginConfigs": { "savvy-progress": { "options": { "language": "ru" } } } }
 ```
 
+`barPosition`: `above` (default), `below` or `both`. `below` draws the bar in the status line under the prompt, under your own `statusLine` command's output if you have one; it is terminal only, so other surfaces keep the bar above. `both` draws it in each place. The crew count and the dismiss button stay in the bar above; with `below`, `/agents-info` opens the panel.
+
 `autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
 
 Install instructions are in the [repository README](../../README.md).
