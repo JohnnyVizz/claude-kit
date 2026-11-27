@@ -20,6 +20,6 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 { "pluginConfigs": { "savvy-progress": { "options": { "language": "ru" } } } }
 ```
 
-`autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
+`autoOpen`: `always` (default), `savvy` or `any`. With `always` the panel opens when the session starts and whenever a subagent starts, and its "Working now" strip shows a mascot for whoever works at the moment: the Claude crab with the current tool call, or the Codex bot for a `savvy-codex` worker or a `codex` CLI call. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
 
 Install instructions are in the [repository README](../../README.md).

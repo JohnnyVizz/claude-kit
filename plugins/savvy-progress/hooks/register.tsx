@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, Flow, Live, Panel, Phase, PlannedTask } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,6 +11,8 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+// The main session's own activity, for the "Working now" mascot.
+const live = atom({ plugin: 'savvy-progress', key: 'live' } as const, { isWorking: false, isCodex: false, doing: '' })
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -22,7 +24,7 @@ const STEP_BRIEF = `
 Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar.`
 const PANE = 'savvy-agents'
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
-const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light']
+const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light', 'codex', 'gemini']
 // The tools' schemas are advice to the model, not a check: what a call may ask
 // the band and the panel to draw is bounded here.
 const MAX_TASKS = 200
@@ -66,6 +68,7 @@ const STRINGS = {
     isRunning: 'running',
     isFinished: 'finished',
     isPlanned: 'planned',
+    now: 'Working now',
     opened: 'Agents panel opened.',
     closed: 'Agents panel closed.',
     done: 'Done',
@@ -97,6 +100,7 @@ const STRINGS = {
     isRunning: 'работает',
     isFinished: 'завершён',
     isPlanned: 'запланирована',
+    now: 'Сейчас работает',
     opened: 'Панель агентов открыта.',
     closed: 'Панель агентов закрыта.',
     done: 'Готово',
@@ -128,6 +132,7 @@ const STRINGS = {
     isRunning: 'פועל',
     isFinished: 'הסתיים',
     isPlanned: 'מתוכנן',
+    now: 'עובד עכשיו',
     opened: 'חלונית הסוכנים נפתחה.',
     closed: 'חלונית הסוכנים נסגרה.',
     done: 'הושלם',
@@ -249,6 +254,129 @@ const xml = (s: string): string =>
 
 const clip = (s: string, max: number): string => (s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s)
 
+const CLI_START = /^\s*(?:npx\s+)?(codex(?:\.cmd|\.exe)?\s+exec|agy(?:\.cmd|\.exe)?)(?=\s|$)/i
+type CliCommand = Pick<AgentRun, 'model' | 'effort' | 'logPath' | 'outPath'> & { cli: 'codex' | 'gemini'; cwd?: string }
+
+export function parseCliCommand(command: string, home: string): CliCommand | null {
+  const start = CLI_START.exec(command)
+  if (!start) return null
+  const cli = /^codex/i.test(start[1]!) ? 'codex' : 'gemini'
+  const parsed: CliCommand = { cli, model: '' }
+  const path = (value: string) => value.replace(/^~(?=[/\\]|$)/, () => home || '~')
+    .replace(/^\/([a-z])\//i, (_, drive: string) => drive.toUpperCase() + ':/')
+  // Keep quoted prompts/paths as single words. Stop before a heredoc body or a second command.
+  const line = command.slice(start[0].length).split(/\r?\n/, 1)[0] ?? ''
+  const words = line.match(/(?:[012]?>&[012]|[012]?>>?|<<|[;&|]|(?:[^\s<>'";&|]+|"[^"]*"|'[^']*')+)/g) ?? []
+  const unquote = (word: string) => word.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => double ?? single)
+  for (let i = 0; i < words.length; i++) {
+    const flag = words[i]!
+    if (/^[;&|]$/.test(flag)) break
+    const value = unquote(words[i + 1] ?? '')
+    if (flag === '>' || flag === '1>') {
+      if (cli === 'codex') parsed.logPath = path(value)
+      else parsed.outPath = path(value)
+    } else if (cli === 'gemini' && flag === '2>') parsed.logPath = path(value)
+    else if (cli === 'codex' && flag === '-o') parsed.outPath = path(value)
+    else if (cli === 'codex' && flag === '-C') parsed.cwd = path(value)
+    else if (flag === '--model' || (cli === 'codex' && flag === '-m')) parsed.model = value
+    else if (cli === 'codex' && flag === '-c') {
+      if (value.startsWith('model_reasoning_effort=')) parsed.effort = value.slice('model_reasoning_effort='.length)
+    } else {
+      if (flag.startsWith('--model=')) parsed.model = unquote(flag.slice(8))
+      continue
+    }
+    i++
+  }
+  return parsed
+}
+
+// Feed complete lines to the marker parser. A final fragment belongs to the next chunk.
+export function applyCodexLog(run: AgentRun, text: string): AgentRun {
+  const next = { ...run }
+  const lines = ((run.logCarry ?? '') + text).split('\n')
+  next.logCarry = lines.pop() || undefined
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '')
+    const marker = next.logMarker
+    next.logMarker = undefined
+    if (marker === 'exec') {
+      const wrapped = /^(?:"[^"]*powershell\.exe"|(?:\S*[/\\])?powershell\.exe)\s+-Command\s+(['"])(.*)\1(?: in .+)?$/i.exec(line)
+      const command = wrapped?.[2] ?? line.replace(/ in (?:[A-Za-z]:[/\\]|\/).*$/, '')
+      next.steps++
+      next.stepNote = clip(command, MAX_TITLE)
+    } else if (marker === 'codex') next.stepNote = clip(line, MAX_TITLE)
+    else if (marker === 'tokens used' && /^\d+(?:,\d{3})*$/.test(line.trim())) {
+      const tokens = Number(line.trim().replace(/,/g, ''))
+      if (Number.isSafeInteger(tokens)) {
+        next.tokens = tokens
+        next.tokensReported = true
+      }
+    } else if (line === 'exec' || line === 'codex' || line === 'tokens used') {
+      next.logHeaderDone = true
+      next.logMarker = line
+    } else if (!next.logHeaderDone) {
+      if (line.startsWith('model: ')) next.model = clip(line.slice(7).trim(), MAX_TITLE)
+      if (line.startsWith('reasoning effort: ')) next.effort = clip(line.slice('reasoning effort: '.length).trim(), MAX_TITLE)
+      if (line.startsWith('session id:') || line === 'user') next.logHeaderDone = true
+    }
+  }
+  return next
+}
+
+const LOG_CHUNK = 256 * 1024
+
+function logFileError($: EngineInterface, error: unknown) {
+  if (!String(error).includes('ENOENT') && (error as { code?: string })?.code !== 'ENOENT') {
+    $.ui.log(String(error), { to: 'debug' })
+  }
+}
+
+async function resultTime($: EngineInterface, outPath: string | undefined, startedAt: number) {
+  if (!outPath) return
+  try {
+    const out = await $.fs.stat(outPath)
+    if (out.kind === 'file' && out.size > 0 && out.mtimeMs >= startedAt) return out.mtimeMs
+  } catch (err) { logFileError($, err) }
+}
+
+async function pollCli($: EngineInterface, run: AgentRun): Promise<AgentRun> {
+  let next = run
+  const endedAt = run.status === 'running' ? await resultTime($, run.outPath, run.startedAt) : undefined
+  if (endedAt !== undefined) next = { ...next, status: 'done', endedAt }
+  // shortcut: a crashed background CLI without a result file stays running until the relay reports it.
+  if (!run.logPath) return next
+  // The CLI may write its token footer immediately after creating its result.
+  let pending = next.status === 'done' && run.status === 'running'
+  try {
+    const stat = await $.fs.stat(run.logPath)
+    const offset = run.logScanOffset ?? run.logOffset ?? 0
+    const length = Math.min(LOG_CHUNK, stat.size - offset)
+    if (length > 0 && stat.kind === 'file' && stat.mtimeMs >= run.startedAt) {
+      const { base64 } = await $.fs.read(run.logPath, { as: 'bytes', offset, length })
+      // The engine provides the typed-array base64 API ahead of its TypeScript lib.
+      const bytes = (Uint8Array as Uint8ArrayConstructor & { fromBase64(s: string): Uint8Array }).fromBase64(base64)
+      const last = bytes.lastIndexOf(10)
+      if (last >= 0) {
+        // An oversized line was sampled on its first read. Resume at its newline.
+        const from = run.logScanOffset === undefined ? 0 : bytes.indexOf(10)
+        const text = new TextDecoder().decode(bytes.subarray(from, last + 1))
+        if (run.cli === 'codex') next = applyCodexLog(next, text)
+        else {
+          const note = ((next.logCarry ?? '') + text).trimEnd().split('\n').pop()?.trim()
+          next = { ...next, stepNote: note ? clip(note, MAX_TITLE) : next.stepNote, logCarry: undefined }
+        }
+        next = { ...next, logOffset: offset + last + 1, logScanOffset: undefined }
+      } else if (bytes.length === LOG_CHUNK) {
+        next = { ...next, logScanOffset: offset + bytes.length,
+          logCarry: run.logCarry ?? new TextDecoder().decode(bytes.subarray(0, MAX_TITLE * 4)) }
+      }
+      if (offset + bytes.length < stat.size) pending = true
+    }
+  } catch (err) { logFileError($, err) }
+  if (next.status !== 'running' && !!next.logPending !== pending) next = { ...next, logPending: pending }
+  return next
+}
+
 // CJK, fullwidth forms and emoji advance about 1em; at 0.56em a Chinese title was sized at half its width and the bar drew over it.
 // 中日韩文字、全角标点和 emoji 约占 1em；按 0.56em 算时中文标题宽度被低估近一半，进度条会压到标题上。
 const WIDE =
@@ -361,6 +489,8 @@ const TIER_COLOR: Record<string, string> = {
   careful: '#BA7517',
   medium: '#378ADD',
   light: '#1D9E75',
+  codex: '#10A37F',
+  gemini: '#4C8DF6',
   other: '#888780',
 }
 
@@ -382,7 +512,10 @@ const tierModel = (tier: string): string => {
 }
 
 // "Opus 5.5 · low" for a run, or just the model when no effort was seen.
-const runModel = (a: AgentRun): string => (a.effort ? `${modelName(a.model)} · ${effortWord(a.effort)}` : modelName(a.model))
+const isRelay = (type: string): boolean => /(?:^|:)savvy-(?:codex|gemini)$/.test(type)
+const runModel = (a: AgentRun): string => [
+  ...(isRelay(a.type) ? ['relay'] : []), modelName(a.model), ...(a.effort ? [effortWord(a.effort)] : []),
+].join(' · ')
 
 // USD per million tokens: input, output, cache read, cache write. The first row that
 // matches a model id wins, so a release sits above its family.
@@ -440,6 +573,7 @@ const windowOf = (model: string): number => (/haiku-4|claude-3/i.test(model) ? 2
 
 // `savvy-careful`, or `savvy-flow:savvy-careful` when the agents ship in a plugin.
 const tierOf = (type: string): string => {
+  if (type === 'codex' || type === 'gemini') return type
   const bare = type.replace(/^[^:]*:/, '')
   const t = bare.replace(/^savvy-/, '').toLowerCase()
   return Object.hasOwn(TIER_COLOR, t) && bare.startsWith('savvy-') ? t : 'other'
@@ -560,6 +694,9 @@ const CRAB_CSS = `<style>
 @keyframes wave{50%{transform:skewY(-12deg) scaleX(.85)}}
 .c-explore.run .it{transform-origin:50% 100%;animation:fence .5s ease-in-out infinite}
 @keyframes fence{50%{transform:rotate(25deg)}}
+.c-codex.run .ant{animation:blink 1s steps(1) infinite}.c-codex.run .cur{animation:blink .5s steps(1) infinite}
+.c-gemini.run{animation:float 1s ease-in-out infinite}.c-gemini.run .bd{animation:none}
+.c-gemini.run .tw{animation:blink .5s steps(1) infinite}.c-gemini.run .tw2{animation:blink .5s steps(1) infinite -.25s}
 @media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
 </style>`
 
@@ -606,6 +743,26 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     stamp(f, 5, 3, ['.kk..............kk.', '.kkk....kkkk....kkk.', '..kkkkkkkwwkkkkkkk..', '..kkkkkkkkkkkkkkkk..', '.gggggggggggggggggg.'], { k: '#55514C', w: '#F8F6F1', g: '#F5C542' })
     f(7, 11, 11, 1, INK); f(18, 11, 4, 3, INK)
     f(27, 6, 1, 9, '#C9CCD2', 'it'); f(26, 15, 3, 1, '#7A4A26', 'it')
+  },
+  // Codex: not a crab but a little terminal bot; the antenna blinks, the cursor after `>` flashes.
+  codex: (f, t) => {
+    const B = '#6B7280'
+    f(14, 6, 2, 4, '#8E929A'); f(14, 4, 2, 2, t, 'ant')
+    f(6, 10, 18, 12, B); f(7, 10, 16, 1, '#8E929A')
+    f(8, 12, 14, 8, '#16181C')
+    stamp(f, 10, 14, ['g..', '.g.', 'g..'], { g: t })
+    f(14, 16, 4, 1, t, 'cur')
+    f(3, 14, 3, 3, B); f(24, 14, 3, 3, B)
+    f(8, 22, 2, 4, B, 'la'); f(18, 22, 2, 4, B, 'la')
+    f(12, 22, 2, 4, B, 'lb'); f(20, 22, 2, 4, B, 'lb')
+  },
+  // Gemini: a living four-point sparkle, blue fading to violet; floats, and two twinkles blink.
+  gemini: (f, t) => {
+    stamp(f, 5, 5, ['.........bb.........', '.........bb.........', '........bbbb........', '........bbbb........', '.......bbbbbb.......', '......bbbbbbbb......', '....bbbbbbbbbbbb....', '.bbbbbbbbbbbbbbbbbb.', 'bbbbbbbbbbbbbbbbbbbb', 'pppppppppppppppppppp', '.pppppppppppppppppp.', '....pppppppppppp....', '......pppppppp......', '.......pppppp.......', '........pppp........', '........pppp........', '.........pp.........', '.........pp.........'], { b: t, p: '#9B72CB' })
+    f(13, 8, 1, 2, '#fff')
+    f(10, 12, 2, 2, INK); f(18, 12, 2, 2, INK); f(14, 15, 2, 1, INK)
+    stamp(f, 25, 2, ['.y.', 'yyy', '.y.'], { y: '#F5C542' }, 'tw')
+    stamp(f, 2, 21, ['.y.', 'yyy', '.y.'], { y: t }, 'tw2')
   },
   other: f => crabBody(f),
 }
@@ -686,12 +843,15 @@ const headerHeight = (title: string): number => (title ? 72 : 44)
 
 // The task's own progress when the worker reports steps; a finished run is full.
 const progressOf = (a: AgentRun): number | null => {
-  if (a.status === 'done') return 1
+  if (!a.cli && a.status === 'done') return 1
   if (a.stepTotal) return Math.min(1, (a.stepDone ?? 0) / a.stepTotal)
   return null
 }
 
 const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
+
+const cliStats = (a: AgentRun) => [a.steps + ' cmds', (a.tokensReported || a.tokens ? a.tokens.toLocaleString('en-US') : '—') + ' tok', 'sub'].join(' · ')
+const rowHeight = (a: AgentRun) => a.cli ? 82 : 66
 
 const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const s = tr()
@@ -704,22 +864,23 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   if (a.status === 'failed') meta.push(s.failed)
   const barW = textW
   const progress = progressOf(a)
-  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
-  const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
-  const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
+  const stats = a.cli ? `${cliStats(a)}  ${fmtTime(elapsed(a, at))}` : `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+  const steps = a.cli ? a.stepNote : a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
+  const stepsW = a.cli ? barW : Math.max(0, barW - textWidth(stats, 11) - 12)
+  const height = rowHeight(a)
   // Without reported steps the bar falls back to the context, drawn grey.
-  const fillW = Math.round(barW * (progress ?? ctx / 100))
+  const fillW = Math.round(barW * (progress ?? (a.cli ? 0 : ctx / 100)))
   return svg(
     W,
-    66,
+    height,
     `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
-<text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
+<text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s"> · ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
-<text class="s" ${endText(W, 42 + barW, 49, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${stats}</text>
-<rect class="k" x="${mx(W, 42, barW)}" y="55" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, 42, fillW)}" y="55" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
+<text class="s" ${endText(W, 42 + barW, height - 17, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${stats}</text>
+<rect class="k" x="${mx(W, 42, barW)}" y="${height - 11}" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, 42, fillW)}" y="${height - 11}" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
 ${statusMark(mx(W, W - 8), 16, a.status, color)}
-<line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
+<line class="ln" x1="0" y1="${height - 0.5}" x2="${W}" y2="${height - 0.5}"/>`,
   )
 }
 
@@ -758,6 +919,40 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnTy
     32,
     `${body}${more ? `<text class="s" ${startText(W, x, 21, false)} font-family="${FONT}" font-size="12">+${more}</text>` : ''}
 <text class="s" ${endText(W, W, 21)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">≈${fmtCost(t.cost)} · ${fmtTokens(t.tokens)} · ${fmtTime(t.time)}</text>`,
+  )
+}
+
+// Who is working right now: Claude (the plain crab) or Codex (the terminal bot), and on what.
+type Worker = { who: 'Claude' | 'Codex' | 'Gemini'; doing: string }
+
+const workersOf = (m: Live, running: AgentRun[]): Worker[] => {
+  const workers: Worker[] = []
+  const parents = new Set(running.filter(a => a.cli).map(a => a.parentId))
+  if (m.isWorking && !running.some(a => a.id === m.cliId))
+    workers.push({ who: m.isCodex ? 'Codex' : 'Claude', doing: m.doing })
+  for (const a of running) {
+    const tier = tierOf(a.type)
+    if ((tier === 'codex' || tier === 'gemini') && (a.cli || !parents.has(a.id))) {
+      workers.push({ who: tier === 'codex' ? 'Codex' : 'Gemini', doing: a.stepNote || (a.id === m.cliId && m.doing) || a.description })
+    }
+  }
+  return workers
+}
+
+// Costume, color and terminal glyph of each "Working now" worker.
+const WHO: Record<Worker['who'], [costume: string, glyph: string]> = { Claude: ['other', '✻'], Codex: ['codex', '▣'], Gemini: ['gemini', '✦'] }
+const whoColor = (w: Worker): string => (w.who === 'Claude' ? CLAY : colorOf(WHO[w.who][0]))
+
+const NOW_H = 44
+const nowSvg = (W: number, w: Worker): string => {
+  const costume = WHO[w.who][0]
+  return svg(
+    W,
+    NOW_H,
+    `${rowCrab(W, 0, 6, costume, false, true)}
+<text class="t" ${startText(W, 42, 18, false)} font-family="${FONT}" font-size="13" font-weight="600">${w.who}</text>
+<text class="s" ${startText(W, 42, 34)} font-family="${FONT}" font-size="11">${xml(fitText(w.doing || '…', 11, W - 64))}</text>
+${statusMark(mx(W, W - 8), 16, 'running', whoColor(w))}`,
   )
 }
 
@@ -850,15 +1045,80 @@ export const register: Register = (on, options) => {
     })
 
     // Ticks the running agents' clocks; quiet when nothing runs.
-    $.clock.every(1000, () => {
-      void (async () => {
+    let polling = false
+    $.clock.every(1000, async () => {
+      if (polling) return
+      polling = true
+      try {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        if (!list.some(a => a.status === 'running' || a.logPending)) return
         const at = await $.clock.now()
+        for (const run of list) {
+          if (!run.cli || (run.status !== 'running' && !run.logPending)) continue
+          const refreshed = await pollCli($, run)
+          if (refreshed !== run) await update($, agents, rows => rows.map(a =>
+            a.id === run.id && a.status === run.status && a.startedAt === run.startedAt ? refreshed : a))
+        }
         await update($, now, () => at)
-      })()
+      } finally { polling = false }
     })
+    if ((options.autoOpen ?? 'always') === 'always') void $.ui.open({ id: PANE, title: tr().pane })
     return started
+  })
+
+  // The main loop's turn: Claude is working from its start to its end.
+  on('turn.start', async ($, e, next) => {
+    if (!e.agentId) await update($, live, () => ({ isWorking: true, isCodex: false, doing: clip(e.text.trim().split('\n')[0] ?? '', MAX_TITLE) }))
+    return next(e)
+  })
+
+  // What the main loop is doing: the tool call's own description, else the tool's name.
+  // A Bash call to the `codex` CLI shows the Codex mascot while it runs.
+  on('tool.call', async ($, e, next) => {
+    const input = e as unknown as { description?: string; command?: string; run_in_background?: boolean }
+    const command = e.tool === 'Bash' || e.tool === 'PowerShell' ? input.command ?? '' : ''
+    const cli = CLI_START.test(command)
+      ? parseCliCommand(command, await $.env.get('HOME') || await $.env.get('USERPROFILE') || '')
+      : null
+    const id = 'cli-' + e.tool_use_id
+    const startedAt = cli ? await $.clock.now() : 0
+    if (cli) {
+      const parts = (cli.logPath || cli.outPath || '').split(/[/\\]/)
+      const name = parts.pop() || ''
+      const slug = (name === 'agy.log' ? parts.pop() : name.replace(/^savvy-/, '').replace(/\.[^.]+$/, '')) || ''
+      await update($, agents, list => {
+        const parent = e.agentId && list.find(a => a.agentId === e.agentId && a.status === 'running' && isRelay(a.type))
+        const run: AgentRun = {
+          id, parentId: e.agentId, type: cli.cli, cli: cli.cli, model: cli.model, effort: cli.effort,
+          logPath: cli.logPath, outPath: cli.outPath, logOffset: 0, startedAt, status: 'running',
+          description: (parent && parent.description) || clip([cli.cli, slug].filter(Boolean).join(' '), MAX_TITLE),
+          steps: 0, tokens: 0, contextTokens: 0, contextMax: 0, costUsd: 0, round: 1,
+        }
+        return [...list.filter(a => a.id !== id), run].slice(-200)
+      })
+    } else if (e.agentId) return next(e)
+
+    const isCodex = /^\s*(npx\s+)?codex(\.cmd|\.exe)?\b/i.test(command)
+    if (!e.agentId) await update($, live, () => ({
+      isWorking: true, isCodex, cliId: cli ? id : undefined,
+      doing: clip((typeof input.description === 'string' && input.description.trim()) || String(e.tool), MAX_TITLE),
+    }))
+    let failed = true
+    try {
+      const result = await next(e)
+      failed = result.isError === true || result.deny !== undefined
+      return result
+    } finally {
+      if (cli && (failed || !input.run_in_background)) {
+        const resultAt = failed ? undefined : await resultTime($, cli.outPath, startedAt)
+        const endedAt = resultAt ?? await $.clock.now()
+        await update($, agents, rows => rows.map((a): AgentRun => a.id === id
+          ? { ...a, status: failed ? 'failed' : 'done', endedAt: a.endedAt ?? endedAt, logPending: !!a.logPath }
+          : a))
+      }
+      if (!e.agentId && (isCodex || cli)) await update($, live, p =>
+        p.cliId === (cli ? id : undefined) ? { ...p, isCodex: false, cliId: undefined } : p)
+    }
   })
 
   on('command.run', { command: 'agents-info' }, async ($, e) => {
@@ -929,7 +1189,7 @@ export const register: Register = (on, options) => {
 
     const at = await $.clock.now()
     await update($, agents, list => {
-      const round = 1 + list.filter(a => norm(a.description) === norm(e.description) && e.description).length
+      const round = 1 + list.filter(a => !a.cli && norm(a.description) === norm(e.description) && e.description).length
       const run: AgentRun = {
         id: started.agentId ?? e.tool_use_id,
         agentId: started.agentId,
@@ -951,7 +1211,7 @@ export const register: Register = (on, options) => {
     if (e.subagentType.startsWith('savvy-')) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
-    } else if (options.autoOpen === 'any') {
+    } else if (options.autoOpen === 'any' || (options.autoOpen ?? 'always') === 'always') {
       await autoOpen($, 'any-agent')
     }
     return started
@@ -997,6 +1257,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const agentId = e.agentId
+    if (!agentId) await update($, live, () => ({ isWorking: false, isCodex: false, doing: '' }))
     if (agentId) {
       const at = await $.clock.now()
       await update($, agents, list =>
@@ -1042,6 +1303,7 @@ export const register: Register = (on, options) => {
     const t = totals(list, at)
     // The pane's title says "Agents"; inside, only the flow's own name.
     const title = f && !f.isFinished ? f.title : ''
+    const workers = workersOf(await read($, live), running)
 
     const toggleCompact = (
       <Button
@@ -1073,17 +1335,21 @@ export const register: Register = (on, options) => {
 
       // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
       const align = isRtl() ? 'flex-end' : undefined
+      const nowRows = workers.map((w, i) => (
+        <Svg key={`now-${i}`} source={nowSvg(W, w)} alt={`${w.who}: ${w.doing}`} width={W} height={NOW_H} />
+      ))
       if (p.isCompact) {
         return (
           <Box flexDirection="column" gap={1} alignItems={align}>
+            {nowRows}
             <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
             {toggleCompact}
           </Box>
         )
       }
-      const shownDone = p.isDoneCollapsed ? 0 : finished.length
-      const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      const shown = p.isDoneCollapsed ? running : [...running, ...finished]
+      const lines = 1 + (workers.length > 0 ? 1 : 0) + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
+      const gridH = headerHeight(title) + lines * LINE_H + workers.length * NOW_H + shown.reduce((h, a) => h + rowHeight(a), 0) + planned.length * 46
       return (
         <Box flexDirection="column">
           {/* The grid sizes the pane; the content is placed over it, as an
@@ -1094,15 +1360,17 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
             <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
             {toggleCompact}
+            {workers.length > 0 && section('h-now', s.now)}
+            {nowRows}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
             {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
+              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${runModel(a)}, ${s.isRunning}`} width={W} height={rowHeight(a)} />
             ))}
             {finished.length > 0 && toggleDone}
             {!p.isDoneCollapsed &&
               finished.map(a => (
-                <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
+                <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${runModel(a)}, ${s.isFinished}`} width={W} height={rowHeight(a)} />
               ))}
             {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
             {planned.map(pl => (
@@ -1137,12 +1405,13 @@ export const register: Register = (on, options) => {
             {tier === 'other' ? a.type : tierWord(tier)} · {model}
             {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
           </Text>
+          {a.cli && a.stepNote && <Text dimColor wrap="truncate-end">  {a.stepNote}</Text>}
           <Text wrap="truncate-end">
             {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
+            {progress === null ? <Text dimColor>{ctxBar(a.cli ? 0 : ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {a.cli ? cliStats(a) : `${steps}${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)} ≈${fmtCost(a.costUsd)}`} {fmtTime(elapsed(a, at))}
             </Text>
           </Text>
         </Box>
@@ -1160,6 +1429,12 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
         </Text>
+        {workers.map((w, i) => (
+          <Text key={`now-${i}`} wrap="truncate-end">
+            <Text color={whoColor(w)}>{WHO[w.who][1]}</Text> <Text bold>{w.who}</Text>
+            <Text dimColor> · {w.doing || '…'}</Text>
+          </Text>
+        ))}
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
